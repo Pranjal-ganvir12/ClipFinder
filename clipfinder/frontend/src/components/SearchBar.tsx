@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { apiFetch } from "../api";
 
 interface SearchResult {
   video_id: string;
@@ -27,7 +28,7 @@ const SearchBar: React.FC<SearchBarProps> = ({ onResults }) => {
     setError(null);
 
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `/api/search?q=${encodeURIComponent(query.trim())}`
       );
 

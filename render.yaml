@@ -1,0 +1,31 @@
+# Render.com Blueprint - Infrastructure as Code
+# Deploy with: Connect GitHub repo to Render, it auto-detects this file
+# Free tier: 750 hours/month, 512MB RAM, spins down after 15min inactivity
+
+services:
+  - type: web
+    name: clipfinder-api
+    runtime: docker
+    dockerfilePath: ./clipfinder/backend/Dockerfile
+    dockerContext: ./clipfinder/backend
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: CLIPFINDER_ENV
+        value: production
+      - key: FRONTEND_URL
+        sync: false  # Set this to your Vercel URL after deploying frontend
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        value: clipfinder-videos
+      - key: R2_PUBLIC_URL
+        sync: false
+    disk:
+      name: clipfinder-storage
+      mountPath: /app/storage
+      sizeGB: 1  # Free tier includes 1GB persistent disk

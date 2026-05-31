@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
+import { apiFetch } from "../api";
 
 interface UploadedVideo {
   video_id: string;
@@ -25,7 +26,6 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Poll status for videos that are still processing
   useEffect(() => {
     const pendingVideos = uploadedVideos.filter(
       (v) => v.status === "pending" || v.status === "processing"
@@ -51,7 +51,7 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
           updated[i].status === "processing"
         ) {
           try {
-            const res = await fetch(
+            const res = await apiFetch(
               `/api/videos/status/${updated[i].video_id}`
             );
             if (res.ok) {
@@ -59,10 +59,7 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
               if (data.status !== updated[i].status) {
                 updated[i] = { ...updated[i], status: data.status };
                 anyChanged = true;
-                if (
-                  data.status === "completed" ||
-                  data.status === "failed"
-                ) {
+                if (data.status === "completed" || data.status === "failed") {
                   onUploadComplete();
                 }
               }
@@ -76,7 +73,7 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
       if (anyChanged) {
         setUploadedVideos(updated);
       }
-    }, 2000);
+    }, 3000);
 
     return () => {
       if (pollIntervalRef.current) {
@@ -94,7 +91,7 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
     formData.append("file", file);
 
     try {
-      const response = await fetch("/api/upload", {
+      const response = await apiFetch("/api/upload", {
         method: "POST",
         body: formData,
       });
@@ -116,19 +113,16 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
     }
   };
 
-  const handleDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      setIsDragging(false);
-      const file = e.dataTransfer.files[0];
-      if (file && file.type.startsWith("video/")) {
-        handleUpload(file);
-      } else {
-        setError("Please drop a valid video file.");
-      }
-    },
-    []
-  );
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file && file.type.startsWith("video/")) {
+      handleUpload(file);
+    } else {
+      setError("Please drop a valid video file.");
+    }
+  }, []);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -149,14 +143,13 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
 
   return (
     <div className="space-y-4">
-      {/* Drop Zone */}
       <div
         onDrop={handleDrop}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onClick={() => fileInputRef.current?.click()}
         className={`
-          border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all duration-200
+          border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-all duration-200
           ${
             isDragging
               ? "border-indigo-400 bg-indigo-500/10"
@@ -171,9 +164,9 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
           onChange={handleFileSelect}
           className="hidden"
         />
-        <div className="flex flex-col items-center gap-3">
+        <div className="flex flex-col items-center gap-2">
           <svg
-            className="w-10 h-10 text-slate-400"
+            className="w-8 h-8 text-slate-400"
             fill="none"
             stroke="currentColor"
             viewBox="0 0 24 24"
@@ -186,43 +179,41 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
             />
           </svg>
           {uploading ? (
-            <p className="text-indigo-400 font-medium">Uploading...</p>
+            <p className="text-indigo-400 font-medium text-sm">Uploading...</p>
           ) : (
             <>
-              <p className="text-slate-300 font-medium">
-                Drop video here or click to browse
+              <p className="text-slate-300 font-medium text-sm">
+                Drop video or click to browse
               </p>
-              <p className="text-slate-500 text-sm">
-                Supports MP4, WebM, MOV, AVI
+              <p className="text-slate-500 text-xs">
+                MP4, WebM, MOV, AVI (max {import.meta.env.VITE_MAX_UPLOAD_MB || 100}MB)
               </p>
             </>
           )}
         </div>
       </div>
 
-      {/* Error Display */}
       {error && (
         <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm">
           {error}
         </div>
       )}
 
-      {/* Processing Queue */}
       {uploadedVideos.length > 0 && (
         <div className="space-y-2">
-          <h3 className="text-sm font-medium text-slate-400 uppercase tracking-wider">
+          <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider">
             Processing Queue
           </h3>
           {uploadedVideos.map((video) => (
             <div
               key={video.video_id}
-              className="flex items-center justify-between bg-slate-800/50 rounded-lg p-3"
+              className="flex items-center justify-between bg-slate-800/50 rounded-lg p-2.5"
             >
-              <span className="text-sm text-slate-300 truncate max-w-[160px]">
+              <span className="text-xs text-slate-300 truncate max-w-[140px]">
                 {video.filename}
               </span>
               <span
-                className={`text-xs font-medium px-2 py-1 rounded-full ${
+                className={`text-xs font-medium px-2 py-0.5 rounded-full ${
                   video.status === "completed"
                     ? "bg-green-500/20 text-green-400"
                     : video.status === "failed"

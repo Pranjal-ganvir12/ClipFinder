@@ -1,22 +1,36 @@
+"""
+Database layer supporting both local SQLite and Turso (libsql) for production.
+Turso free tier: 8GB storage, 1B row reads/month — more than enough.
+"""
 import sqlite3
 import os
 from pathlib import Path
+from app.config import settings
 
-STORAGE_DIR = Path(__file__).parent.parent / "storage"
-DB_PATH = STORAGE_DIR / "clipfinder.db"
+# ─── Connection Setup ─────────────────────────────────────────────────────────
 
-STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-(STORAGE_DIR / "videos").mkdir(parents=True, exist_ok=True)
-(STORAGE_DIR / "lancedb").mkdir(parents=True, exist_ok=True)
+if settings.use_turso:
+    # Use libsql for Turso (SQLite-compatible edge database)
+    import libsql_experimental as libsql
 
+    def get_connection():
+        """Get a Turso/libsql connection."""
+        conn = libsql.connect(
+            database=settings.TURSO_DATABASE_URL,
+            auth_token=settings.TURSO_AUTH_TOKEN,
+        )
+        return conn
+else:
+    # Local SQLite for development
+    DB_PATH = settings.STORAGE_DIR / "clipfinder.db"
 
-def get_connection() -> sqlite3.Connection:
-    """Create and return a new SQLite connection with row factory."""
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    def get_connection() -> sqlite3.Connection:
+        """Create and return a new SQLite connection with row factory."""
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
 
 
 def init_db() -> None:
@@ -29,7 +43,8 @@ def init_db() -> None:
                 filename TEXT NOT NULL,
                 filepath TEXT NOT NULL,
                 duration REAL DEFAULT 0.0,
-                status TEXT NOT NULL DEFAULT 'pending'
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT DEFAULT (datetime('now'))
             )
         """)
         conn.execute("""
@@ -39,8 +54,11 @@ def init_db() -> None:
                 text TEXT NOT NULL,
                 start_time REAL NOT NULL,
                 end_time REAL NOT NULL,
-                FOREIGN KEY (video_id) REFERENCES videos(id)
+                FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
             )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_segments_video_id ON segments(video_id)
         """)
         conn.commit()
     finally:

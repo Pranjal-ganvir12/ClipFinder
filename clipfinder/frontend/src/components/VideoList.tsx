@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { apiFetch } from "../api";
 
 interface Video {
   video_id: string;
@@ -34,7 +35,7 @@ const VideoList: React.FC<VideoListProps> = ({ refreshTrigger, onSelectVideo }) 
   const fetchVideos = async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/videos");
+      const res = await apiFetch("/api/videos");
       if (res.ok) {
         const data = await res.json();
         setVideos(data);
@@ -52,15 +53,15 @@ const VideoList: React.FC<VideoListProps> = ({ refreshTrigger, onSelectVideo }) 
 
   if (videos.length === 0 && !loading) {
     return (
-      <div className="text-center py-6">
-        <p className="text-slate-500 text-sm">No videos uploaded yet</p>
+      <div className="text-center py-4">
+        <p className="text-slate-500 text-xs">No videos uploaded yet</p>
       </div>
     );
   }
 
   return (
     <div className="space-y-2">
-      <h3 className="text-sm font-medium text-slate-400 uppercase tracking-wider">
+      <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider">
         Library ({videos.length})
       </h3>
       {videos.map((video) => (
@@ -72,25 +73,25 @@ const VideoList: React.FC<VideoListProps> = ({ refreshTrigger, onSelectVideo }) 
             }
           }}
           disabled={video.status !== "completed"}
-          className={`w-full text-left p-3 rounded-lg transition-all duration-150 ${
+          className={`w-full text-left p-2.5 rounded-lg transition-all duration-150 ${
             video.status === "completed"
               ? "bg-slate-800/50 border border-slate-700/50 hover:bg-slate-700/50 hover:border-slate-600 cursor-pointer"
               : "bg-slate-800/30 border border-slate-700/30 cursor-not-allowed opacity-60"
           }`}
         >
           <div className="flex items-center justify-between">
-            <span className="text-sm text-slate-200 truncate max-w-[140px]">
+            <span className="text-xs text-slate-200 truncate max-w-[130px]">
               {video.filename}
             </span>
-            <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_COLORS[video.status] || ""}`}>
+            <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${STATUS_COLORS[video.status] || ""}`}>
               {video.status}
             </span>
           </div>
-          {video.duration && (
-            <p className="text-xs text-slate-500 mt-1">
-              Duration: {formatDuration(video.duration)}
+          {video.duration ? (
+            <p className="text-[10px] text-slate-500 mt-0.5">
+              {formatDuration(video.duration)}
             </p>
-          )}
+          ) : null}
         </button>
       ))}
     </div>

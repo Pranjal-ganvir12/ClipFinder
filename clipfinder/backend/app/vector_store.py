@@ -1,14 +1,18 @@
+"""
+Vector store using LanceDB (embedded, serverless, free).
+Sentence-transformers model runs locally for embedding generation.
+"""
 import lancedb
 import pyarrow as pa
-import numpy as np
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
 from typing import List, Dict, Any
+from app.config import settings
 
-STORAGE_DIR = Path(__file__).parent.parent / "storage"
-LANCEDB_DIR = STORAGE_DIR / "lancedb"
+LANCEDB_DIR = settings.LANCEDB_DIR
 
 # Initialize the embedding model globally for offline use
+# all-MiniLM-L6-v2: 384 dimensions, ~80MB, fast on CPU
 embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
 # Define the LanceDB schema
@@ -44,7 +48,7 @@ def encode_text(text: str) -> List[float]:
 
 def encode_texts(texts: List[str]) -> List[List[float]]:
     """Encode multiple text strings into vectors."""
-    embeddings = embedding_model.encode(texts, normalize_embeddings=True)
+    embeddings = embedding_model.encode(texts, normalize_embeddings=True, batch_size=32)
     return embeddings.tolist()
 
 
@@ -68,6 +72,16 @@ def add_embedding(
     }])
 
 
+def add_embeddings_batch(records: List[Dict[str, Any]]) -> None:
+    """Add multiple embedding records at once (more efficient)."""
+    if not records:
+        return
+    db = get_db()
+    ensure_table_exists()
+    table = db.open_table(TABLE_NAME)
+    table.add(records)
+
+
 def search_embeddings(query_vector: List[float], top_k: int = 5) -> List[Dict[str, Any]]:
     """Search for the nearest neighbor vectors in LanceDB."""
     db = get_db()
@@ -76,11 +90,15 @@ def search_embeddings(query_vector: List[float], top_k: int = 5) -> List[Dict[st
         return []
 
     table = db.open_table(TABLE_NAME)
-    results = (
-        table.search(query_vector)
-        .limit(top_k)
-        .to_list()
-    )
+
+    try:
+        results = (
+            table.search(query_vector)
+            .limit(top_k)
+            .to_list()
+        )
+    except Exception:
+        return []
 
     formatted_results = []
     for row in results:
@@ -93,6 +111,16 @@ def search_embeddings(query_vector: List[float], top_k: int = 5) -> List[Dict[st
         })
 
     return formatted_results
+
+
+def delete_video_embeddings(video_id: str) -> None:
+    """Delete all embeddings for a specific video."""
+    db = get_db()
+    existing_tables = db.table_names()
+    if TABLE_NAME not in existing_tables:
+        return
+    table = db.open_table(TABLE_NAME)
+    table.delete(f'video_id = "{video_id}"')
 
 
 # Ensure table exists on module import
