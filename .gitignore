@@ -12,10 +12,12 @@ dist/
 
 # Storage (local data)
 clipfinder/backend/storage/clipfinder.db
-clipfinder/backend/storage/lancedb/*.lance
+clipfinder/backend/storage/clipfinder.db-shm
+clipfinder/backend/storage/clipfinder.db-wal
+clipfinder/backend/storage/lancedb/*
+!clipfinder/backend/storage/lancedb/.gitkeep
 clipfinder/backend/storage/videos/*
 !clipfinder/backend/storage/videos/.gitkeep
-!clipfinder/backend/storage/lancedb/.gitkeep
 
 # IDE
 .vscode/

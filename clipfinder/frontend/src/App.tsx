@@ -3,6 +3,7 @@ import UploadZone from "./components/UploadZone";
 import SearchBar from "./components/SearchBar";
 import VideoPlayer from "./components/VideoPlayer";
 import VideoGallery from "./components/VideoGallery";
+import VideoList from "./components/VideoList";
 
 interface SearchResult {
   video_id: string;
@@ -18,6 +19,9 @@ const App: React.FC = () => {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [selectedResult, setSelectedResult] = useState<SearchResult | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const [activeVideo, setActiveVideo] = useState<{ filepath: string; filename: string } | null>(null);
+  const [activeStartTime, setActiveStartTime] = useState<number | null>(null);
 
   const handleResults = useCallback((newResults: SearchResult[]) => {
     setResults(newResults);
@@ -28,10 +32,17 @@ const App: React.FC = () => {
   const handleSelect = useCallback((result: SearchResult) => {
     setSelectedResult(result);
     setSelectedIndex(results.indexOf(result));
+    setActiveVideo({ filepath: result.filepath, filename: result.filename });
+    setActiveStartTime(result.start_time);
   }, [results]);
 
   const handleUploadComplete = useCallback(() => {
-    // Could refresh video list or notify user
+    setRefreshTrigger((prev) => prev + 1);
+  }, []);
+
+  const handleSelectVideo = useCallback((filepath: string, filename: string) => {
+    setActiveVideo({ filepath, filename });
+    setActiveStartTime(0);
   }, []);
 
   return (
@@ -60,18 +71,26 @@ const App: React.FC = () => {
           </span>
         </div>
         <p className="text-xs text-slate-500">
-          100% Local • No Cloud APIs • Privacy First
+          100% Local &bull; No Cloud APIs &bull; Privacy First
         </p>
       </header>
 
       {/* Main Layout */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left Sidebar - Upload & Queue */}
-        <aside className="w-72 border-r border-slate-800 p-4 overflow-y-auto flex-shrink-0">
-          <h2 className="text-sm font-medium text-slate-400 uppercase tracking-wider mb-3">
-            Upload Videos
-          </h2>
-          <UploadZone onUploadComplete={handleUploadComplete} />
+        {/* Left Sidebar - Upload & Video Library */}
+        <aside className="w-72 border-r border-slate-800 p-4 overflow-y-auto flex-shrink-0 space-y-6">
+          <div>
+            <h2 className="text-sm font-medium text-slate-400 uppercase tracking-wider mb-3">
+              Upload Videos
+            </h2>
+            <UploadZone onUploadComplete={handleUploadComplete} />
+          </div>
+          <div>
+            <VideoList
+              refreshTrigger={refreshTrigger}
+              onSelectVideo={handleSelectVideo}
+            />
+          </div>
         </aside>
 
         {/* Center - Search & Player */}
@@ -79,14 +98,14 @@ const App: React.FC = () => {
           <SearchBar onResults={handleResults} />
           <div className="flex-1 min-h-0">
             <VideoPlayer
-              filepath={selectedResult?.filepath || null}
-              startTime={selectedResult?.start_time || null}
-              filename={selectedResult?.filename || null}
+              filepath={activeVideo?.filepath || null}
+              startTime={activeStartTime}
+              filename={activeVideo?.filename || null}
             />
           </div>
         </main>
 
-        {/* Right Sidebar - Results */}
+        {/* Right Sidebar - Search Results */}
         <aside className="w-80 border-l border-slate-800 p-4 overflow-y-auto flex-shrink-0">
           <VideoGallery
             results={results}
