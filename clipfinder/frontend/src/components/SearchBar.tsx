@@ -50,36 +50,28 @@ const SearchBar: React.FC<SearchBarProps> = ({ onResults }) => {
   return (
     <div className="w-full">
       <form onSubmit={handleSearch}>
-        <div className="relative flex gap-2">
-          <div className="relative flex-1 group">
-            <div className="absolute inset-0 bg-gradient-to-r from-violet-600/20 to-indigo-600/20 rounded-xl blur-xl opacity-0 group-focus-within:opacity-100 transition-opacity duration-300"></div>
-            <div className="relative flex items-center">
-              <svg
-                className="absolute left-4 w-5 h-5 text-slate-500 group-focus-within:text-violet-400 transition-colors"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-                />
-              </svg>
-              <input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search your videos... try 'explains the algorithm' or 'talks about design'"
-                className="w-full pl-12 pr-4 py-3.5 bg-slate-900/80 border border-slate-700/50 rounded-xl text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all text-sm"
-              />
-            </div>
+        <div className="flex gap-3">
+          <div className="relative flex-1">
+            <svg
+              className="absolute left-4 top-1/2 -translate-y-1/2 w-[18px] h-[18px] text-muted"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search your videos... e.g. 'explains the algorithm' or 'talks about design'"
+              className="w-full pl-11 pr-4 py-3 bg-white border border-hairline rounded-xs text-ink text-[15px] placeholder-muted focus:outline-none focus:border-[#9b60aa] focus:ring-1 focus:ring-[#9b60aa]/20 transition-all"
+            />
           </div>
           <button
             type="submit"
             disabled={loading || !query.trim()}
-            className="btn-primary disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none flex items-center gap-2 whitespace-nowrap"
+            className="btn-primary disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap"
           >
             {loading ? (
               <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
@@ -96,12 +88,7 @@ const SearchBar: React.FC<SearchBarProps> = ({ onResults }) => {
         </div>
       </form>
       {error && (
-        <div className="mt-2 flex items-center gap-2 text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
-          <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          {error}
-        </div>
+        <p className="mt-3 text-[13px] text-[#b30000]">{error}</p>
       )}
     </div>
   );
