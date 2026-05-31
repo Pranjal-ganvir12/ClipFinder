@@ -11,16 +11,17 @@ interface UploadZoneProps {
   onUploadComplete: () => void;
 }
 
-const STATUS_LABELS: Record<string, string> = {
-  pending: "Queued...",
-  processing: "Analyzing Audio...",
-  completed: "Ready",
-  failed: "Failed",
+const STATUS_CONFIG: Record<string, { label: string; color: string; icon: string }> = {
+  pending: { label: "Queued", color: "text-amber-400 bg-amber-500/10 border-amber-500/20", icon: "⏳" },
+  processing: { label: "Transcribing", color: "text-blue-400 bg-blue-500/10 border-blue-500/20", icon: "🎙️" },
+  completed: { label: "Ready", color: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20", icon: "✓" },
+  failed: { label: "Failed", color: "text-red-400 bg-red-500/10 border-red-500/20", icon: "✗" },
 };
 
 const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadedVideos, setUploadedVideos] = useState<UploadedVideo[]>([]);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -46,14 +47,9 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
       let anyChanged = false;
 
       for (let i = 0; i < updated.length; i++) {
-        if (
-          updated[i].status === "pending" ||
-          updated[i].status === "processing"
-        ) {
+        if (updated[i].status === "pending" || updated[i].status === "processing") {
           try {
-            const res = await apiFetch(
-              `/api/videos/status/${updated[i].video_id}`
-            );
+            const res = await apiFetch(`/api/videos/status/${updated[i].video_id}`);
             if (res.ok) {
               const data = await res.json();
               if (data.status !== updated[i].status) {
@@ -64,15 +60,11 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
                 }
               }
             }
-          } catch {
-            // Silently continue polling
-          }
+          } catch {}
         }
       }
 
-      if (anyChanged) {
-        setUploadedVideos(updated);
-      }
+      if (anyChanged) setUploadedVideos(updated);
     }, 3000);
 
     return () => {
@@ -86,15 +78,24 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
   const handleUpload = async (file: File) => {
     setError(null);
     setUploading(true);
+    setUploadProgress(0);
 
     const formData = new FormData();
     formData.append("file", file);
+
+    // Simulate progress for UX
+    const progressInterval = setInterval(() => {
+      setUploadProgress((prev) => Math.min(prev + Math.random() * 15, 90));
+    }, 200);
 
     try {
       const response = await apiFetch("/api/upload", {
         method: "POST",
         body: formData,
       });
+
+      clearInterval(progressInterval);
+      setUploadProgress(100);
 
       if (!response.ok) {
         const errData = await response.json().catch(() => null);
@@ -107,9 +108,13 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
         ...prev,
       ]);
     } catch (err: any) {
+      clearInterval(progressInterval);
       setError(err.message || "Upload failed. Please try again.");
     } finally {
-      setUploading(false);
+      setTimeout(() => {
+        setUploading(false);
+        setUploadProgress(0);
+      }, 500);
     }
   };
 
@@ -136,24 +141,22 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      handleUpload(file);
-    }
+    if (file) handleUpload(file);
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
+      {/* Drop Zone */}
       <div
         onDrop={handleDrop}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onClick={() => fileInputRef.current?.click()}
         className={`
-          border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-all duration-200
-          ${
-            isDragging
-              ? "border-indigo-400 bg-indigo-500/10"
-              : "border-slate-600 hover:border-slate-500 hover:bg-slate-800/50"
+          relative overflow-hidden border-2 border-dashed rounded-xl p-5 text-center cursor-pointer transition-all duration-300
+          ${isDragging
+            ? "border-violet-400 bg-violet-500/10 scale-[1.02]"
+            : "border-slate-700/50 hover:border-slate-600 hover:bg-slate-800/30"
           }
         `}
       >
@@ -164,67 +167,67 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
           onChange={handleFileSelect}
           className="hidden"
         />
+
+        {/* Upload progress overlay */}
+        {uploading && (
+          <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm flex flex-col items-center justify-center z-10 rounded-xl">
+            <div className="w-full max-w-[80%] h-1.5 bg-slate-700 rounded-full overflow-hidden mb-2">
+              <div
+                className="h-full bg-gradient-to-r from-violet-500 to-indigo-500 rounded-full transition-all duration-300"
+                style={{ width: `${uploadProgress}%` }}
+              ></div>
+            </div>
+            <p className="text-xs text-violet-300">Uploading... {Math.round(uploadProgress)}%</p>
+          </div>
+        )}
+
         <div className="flex flex-col items-center gap-2">
-          <svg
-            className="w-8 h-8 text-slate-400"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={1.5}
-              d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
-            />
-          </svg>
-          {uploading ? (
-            <p className="text-indigo-400 font-medium text-sm">Uploading...</p>
-          ) : (
-            <>
-              <p className="text-slate-300 font-medium text-sm">
-                Drop video or click to browse
-              </p>
-              <p className="text-slate-500 text-xs">
-                MP4, WebM, MOV, AVI (max {import.meta.env.VITE_MAX_UPLOAD_MB || 100}MB)
-              </p>
-            </>
-          )}
+          <div className={`w-10 h-10 rounded-xl flex items-center justify-center transition-colors ${
+            isDragging ? "bg-violet-500/20" : "bg-slate-800/80"
+          }`}>
+            <svg className={`w-5 h-5 transition-colors ${isDragging ? "text-violet-400" : "text-slate-500"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+            </svg>
+          </div>
+          <div>
+            <p className="text-slate-300 text-sm font-medium">Drop video here</p>
+            <p className="text-slate-600 text-[11px] mt-0.5">MP4, WebM, MOV • Max 100MB</p>
+          </div>
         </div>
       </div>
 
+      {/* Error */}
       {error && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm">
-          {error}
+        <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/20 rounded-lg p-2.5 text-red-400 text-xs">
+          <svg className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span>{error}</span>
         </div>
       )}
 
+      {/* Queue */}
       {uploadedVideos.length > 0 && (
-        <div className="space-y-2">
-          <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider">
-            Processing Queue
-          </h3>
-          {uploadedVideos.map((video) => (
-            <div
-              key={video.video_id}
-              className="flex items-center justify-between bg-slate-800/50 rounded-lg p-2.5"
-            >
-              <span className="text-xs text-slate-300 truncate max-w-[140px]">
-                {video.filename}
-              </span>
-              <span
-                className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-                  video.status === "completed"
-                    ? "bg-green-500/20 text-green-400"
-                    : video.status === "failed"
-                    ? "bg-red-500/20 text-red-400"
-                    : "bg-indigo-500/20 text-indigo-400"
-                }`}
+        <div className="space-y-1.5">
+          {uploadedVideos.map((video) => {
+            const config = STATUS_CONFIG[video.status] || STATUS_CONFIG.pending;
+            return (
+              <div
+                key={video.video_id}
+                className={`flex items-center justify-between rounded-lg p-2.5 border ${config.color} animate-fade-in`}
               >
-                {STATUS_LABELS[video.status] || video.status}
-              </span>
-            </div>
-          ))}
+                <span className="text-[11px] text-slate-300 truncate max-w-[130px]">
+                  {video.filename}
+                </span>
+                <span className="text-[10px] font-medium flex items-center gap-1">
+                  {video.status === "processing" && (
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse"></span>
+                  )}
+                  {config.label}
+                </span>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
