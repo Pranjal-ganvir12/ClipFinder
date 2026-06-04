@@ -1,8 +1,8 @@
-# 🎬 ClipFinder — AI-Powered Multimodal Video Search Engine
+# ClipFinder
 
-> Upload any video. Ask questions in plain English. Jump to the exact moment.
+A full-stack AI video search engine. Upload any video, ask questions in plain English, and jump to the exact moment in the video where that topic is discussed.
 
-ClipFinder is a full-stack **multimodal video search engine** that transcribes video content using local AI models and enables **semantic natural language search** across all uploaded videos — with timestamp-level precision. Built with a focus on **privacy, security, and zero-cost deployment**.
+Built with FastAPI, React, Whisper (speech-to-text), sentence-transformers (semantic embeddings), and LanceDB (vector search). Runs 100% locally on CPU with no paid API keys required. Can also be deployed publicly for free using Render, Vercel, and Cloudflare R2.
 
 ![Python](https://img.shields.io/badge/Python-FastAPI-009688?style=flat-square&logo=fastapi)
 ![React](https://img.shields.io/badge/React-TypeScript-61DAFB?style=flat-square&logo=react)
@@ -11,152 +11,160 @@ ClipFinder is a full-stack **multimodal video search engine** that transcribes v
 
 ---
 
-## Key Features
+## What It Does
 
-- **Semantic Video Search** — Type natural language queries like *"explains the sorting algorithm"* and get results with exact timestamps
-- **AI Transcription Pipeline** — faster-whisper (OpenAI Whisper) transcribes audio → sentence-transformers generates 384-dim embeddings → LanceDB stores vectors for similarity search
-- **Timestamp-Level Navigation** — Click any result to instantly seek the video player to that moment
-- **Multi-User Session Isolation** — Secure cookie-based sessions ensure each user's data is completely private
-- **Authenticated Video Streaming** — Videos served through ownership-verified API endpoints, not raw file URLs
-- **100% Free Deployment** — Runs on Render.com + Vercel + Cloudflare R2 (all free tiers)
-- **Local-First Architecture** — Everything runs on CPU with no paid API dependencies
+1. You upload a video (MP4, WebM, MOV, AVI)
+2. The backend extracts the audio and transcribes it into timestamped text segments using OpenAI's Whisper model running locally
+3. Each text segment gets converted into a 384-dimensional vector using a sentence-transformer model
+4. These vectors are stored in LanceDB for fast similarity search
+5. When you search (for example, "explains the sorting algorithm"), your query is also converted to a vector
+6. The system finds the segments most similar to your query and returns them with timestamps
+7. You click a result and the video player jumps to that exact second
+
+---
+
+## Features
+
+- Natural language search across all video content with timestamp precision
+- AI transcription pipeline (Whisper base model, CPU, int8 quantized)
+- Semantic vector search (not keyword matching, actual meaning-based search)
+- Multi-user session isolation so each person only sees their own uploaded videos
+- Authenticated video streaming (videos are served through ownership-verified endpoints)
+- Signed session cookies (HMAC-SHA256, HttpOnly, Secure in production)
+- File validation (type checking, size limits, filename sanitization)
+- Rate limiting (5 uploads per minute, 30 searches per minute per IP)
+- Path traversal and injection prevention on all inputs
+- Free deployment on Render + Vercel + Cloudflare R2
+- Works fully offline on your local machine with zero external dependencies
 
 ---
 
 ## Tech Stack
 
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| **Backend API** | FastAPI, Python 3.11 | REST API with async handlers, background task processing |
-| **AI / ML** | faster-whisper (base, int8), sentence-transformers (all-MiniLM-L6-v2) | Speech-to-text transcription, semantic text embedding |
-| **Vector Database** | LanceDB (embedded) | Nearest-neighbor search over 384-dim embedding vectors |
-| **Relational DB** | SQLite (WAL mode) / Turso | Video metadata, transcript segments, user ownership |
-| **Object Storage** | Local FS / Cloudflare R2 | Video file storage with presigned URL access |
-| **Frontend** | React 18, TypeScript, Tailwind CSS, Vite | Responsive SPA with real-time status polling |
-| **Auth** | HMAC-signed session cookies | Anonymous user isolation without signup friction |
-| **Deployment** | Docker, Render.com, Vercel | Zero-config CI/CD from GitHub push |
+| Layer | Technology | What It Does |
+|-------|-----------|--------------|
+| Backend API | FastAPI, Python 3.11 | Handles uploads, search, video streaming, auth |
+| Speech to Text | faster-whisper (base model, int8) | Converts video audio into timestamped text |
+| Text Embeddings | sentence-transformers (all-MiniLM-L6-v2) | Converts text into 384-dimensional vectors |
+| Vector Database | LanceDB (embedded, serverless) | Stores and searches vectors by similarity |
+| Relational Database | SQLite with WAL mode | Stores video metadata, transcripts, ownership |
+| Object Storage | Local filesystem or Cloudflare R2 | Stores the actual video files |
+| Frontend | React 18, TypeScript, Tailwind CSS, Vite | User interface with upload, search, and playback |
+| Authentication | HMAC-signed session cookies | User isolation without requiring signup |
+| Deployment | Docker, Render.com, Vercel | Production hosting from GitHub push |
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                         USER BROWSER                              │
-│  ┌─────────────┐  ┌──────────────┐  ┌───────────────────────┐  │
-│  │  Upload Zone │  │  Search Bar  │  │  Video Player + Seek  │  │
-│  └──────┬──────┘  └──────┬───────┘  └───────────┬───────────┘  │
-└─────────┼────────────────┼───────────────────────┼──────────────┘
-          │                │                       │
-          ▼                ▼                       ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                      FastAPI Backend                              │
-│                                                                  │
-│  ┌────────────┐  ┌─────────────────┐  ┌──────────────────────┐ │
-│  │ POST       │  │ GET /api/search  │  │ GET /api/videos/     │ │
-│  │ /api/upload│  │                  │  │     stream/{id}      │ │
-│  └─────┬──────┘  └────────┬────────┘  └──────────┬───────────┘ │
-│        │                   │                      │              │
-│        ▼                   ▼                      ▼              │
-│  ┌───────────┐    ┌──────────────┐      ┌──────────────────┐   │
-│  │ Whisper   │    │ Sentence     │      │ Ownership Check  │   │
-│  │ Transcribe│    │ Transformer  │      │ (Session Cookie) │   │
-│  └─────┬─────┘    │ Encode Query │      └────────┬─────────┘   │
-│        │           └──────┬───────┘               │              │
-│        ▼                  ▼                       ▼              │
-│  ┌───────────┐    ┌──────────────┐      ┌──────────────────┐   │
-│  │ SQLite    │◄──►│   LanceDB    │      │ Cloudflare R2 /  │   │
-│  │ Segments  │    │   Vectors    │      │ Local Storage    │   │
-│  └───────────┘    └──────────────┘      └──────────────────┘   │
-└──────────────────────────────────────────────────────────────────┘
+User Browser
+    |
+    |--- Upload video
+    |--- Search query ("talks about design patterns")
+    |--- Click result to play from timestamp
+    |
+    v
+FastAPI Backend (Python)
+    |
+    |--- POST /api/upload
+    |       Saves file, creates DB record, starts background transcription
+    |
+    |--- GET /api/search?q=...
+    |       Encodes query to vector, searches LanceDB, filters by user ownership
+    |
+    |--- GET /api/videos/stream/{id}
+    |       Verifies ownership via session cookie, then streams video file
+    |
+    |--- Background Pipeline:
+    |       Whisper transcribes audio
+    |       Sentence-transformer embeds each segment
+    |       Segments stored in SQLite + LanceDB
+    |
+    v
+Storage Layer
+    |--- SQLite: video metadata, text segments, user ownership
+    |--- LanceDB: 384-dim vectors for semantic search
+    |--- Cloudflare R2 or local disk: video files
 ```
 
 ---
 
-## Security Features
+## Security
 
-| Feature | Implementation |
-|---------|---------------|
-| **User Isolation** | All data scoped by `owner_id` — users cannot see each other's content |
-| **Authenticated Streaming** | Videos served via `/api/videos/stream/{id}` with ownership verification |
-| **Signed Session Cookies** | HMAC-SHA256 signed, HttpOnly, SameSite=Lax, Secure in production |
-| **Input Validation** | File type whitelist, filename sanitization, UUID validation, HTML tag stripping |
-| **Path Traversal Prevention** | Filename stripped of `../`, null bytes, special chars; resolved path checked |
-| **Rate Limiting** | Per-IP limits: 5 uploads/min, 30 searches/min |
-| **Upload Size Enforcement** | Streaming size check (default 100MB) — rejects mid-upload if exceeded |
-| **XSS Prevention** | Search queries stripped of HTML/script tags before processing |
-| **CORS Hardening** | Explicit origin whitelist, credentials-only, limited methods |
-| **SQL Injection Prevention** | Parameterized queries throughout; UUID format validation on all IDs |
+Every endpoint verifies the user's session cookie before returning data. Videos, transcripts, search results, and embeddings are all scoped to the session that uploaded them.
 
----
-
-## How It Works
-
-1. **Upload** → Video saved to storage, DB entry created with `owner_id`
-2. **Transcribe** → faster-whisper (CPU, int8) produces timestamped text segments
-3. **Embed** → Each segment encoded to 384-dim vector via all-MiniLM-L6-v2
-4. **Index** → Vectors stored in LanceDB, text segments in SQLite
-5. **Search** → Query vectorized → cosine similarity search → filtered by ownership → top 5 returned
-6. **Play** → Click result → video player seeks to exact timestamp via authenticated stream
+| Protection | How It Works |
+|-----------|--------------|
+| User isolation | Every database query filters by owner_id from the session cookie |
+| Video access control | Videos are not served as static files. They go through an API endpoint that checks ownership |
+| Session signing | Cookies are signed with HMAC-SHA256 so they cannot be forged |
+| Input sanitization | Filenames stripped of path traversal characters, search queries stripped of HTML |
+| File validation | Only video file extensions and MIME types are accepted |
+| Size limits | Uploads are rejected mid-stream if they exceed the configured maximum |
+| Rate limiting | Per-IP counters prevent abuse of upload and search endpoints |
+| UUID validation | All video IDs are validated as proper UUIDs before being used in queries |
 
 ---
 
-## Quick Start (Local)
+## Running Locally
 
 ### Backend
+
 ```bash
 cd clipfinder/backend
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
-> First run downloads AI models (~500MB). Subsequent starts are instant.
+
+The first run will download the AI models (about 500MB total). After that, starts are instant.
 
 ### Frontend
+
 ```bash
 cd clipfinder/frontend
 npm install
 npm run dev
 ```
 
-Open **http://localhost:5173**
+Open http://localhost:5173 in your browser.
 
 ---
 
-## Deploy to Production (Free)
+## Deploying for Free
 
-| Service | Purpose | Free Tier |
-|---------|---------|-----------|
-| [Render.com](https://render.com) | Backend API + AI processing | 750 hrs/mo, 512MB RAM |
-| [Vercel](https://vercel.com) | Frontend hosting + CDN | Unlimited |
-| [Cloudflare R2](https://cloudflare.com) | Video file storage | 10GB, 10M reads/mo |
+The entire stack can be hosted publicly at zero cost:
 
-### Deployment Steps
+| Service | Role | Free Tier Limits |
+|---------|------|-----------------|
+| Render.com | Backend API and AI processing | 750 hours per month, 512MB RAM |
+| Vercel | Frontend static hosting and CDN | Unlimited deploys |
+| Cloudflare R2 | Video file storage | 10GB storage, 10 million reads per month |
 
-1. **Cloudflare R2** — Create bucket `clipfinder-videos`, get API credentials
-2. **Render.com** — Connect GitHub repo, set Root Directory to `clipfinder/backend`, add env vars
-3. **Vercel** — Import repo, set Root Directory to `clipfinder/frontend`, set `VITE_API_URL`
+### Steps
 
-See full deployment guide in the codebase's `.env.example` files.
+1. Create a Cloudflare R2 bucket named `clipfinder-videos` and generate API credentials
+2. On Render, create a Web Service from your GitHub repo with root directory `clipfinder/backend` and Docker runtime
+3. Set the environment variables (see below)
+4. On Vercel, import the repo with root directory `clipfinder/frontend` and set `VITE_API_URL` to your Render URL
 
----
+### Backend Environment Variables
 
-## Environment Variables
-
-### Backend (Render)
-```env
+```
 CLIPFINDER_ENV=production
-SESSION_SECRET=<generate: python -c "import secrets; print(secrets.token_hex(32))">
+SESSION_SECRET=<run: python -c "import secrets; print(secrets.token_hex(32))">
 FRONTEND_URL=https://your-app.vercel.app
-R2_ACCOUNT_ID=<cloudflare account id>
-R2_ACCESS_KEY_ID=<r2 api key>
-R2_SECRET_ACCESS_KEY=<r2 secret>
+R2_ACCOUNT_ID=<from cloudflare dashboard>
+R2_ACCESS_KEY_ID=<from R2 API token>
+R2_SECRET_ACCESS_KEY=<from R2 API token>
 R2_BUCKET_NAME=clipfinder-videos
 R2_PUBLIC_URL=https://pub-xxx.r2.dev
 MAX_UPLOAD_SIZE_MB=100
 ```
 
-### Frontend (Vercel)
-```env
+### Frontend Environment Variable
+
+```
 VITE_API_URL=https://clipfinder-api.onrender.com
 ```
 
@@ -168,23 +176,23 @@ VITE_API_URL=https://clipfinder-api.onrender.com
 clipfinder/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py            # FastAPI routes + middleware
-│   │   ├── auth.py            # Session cookie signing/verification
-│   │   ├── config.py          # Environment-based settings
-│   │   ├── database.py        # SQLite/Turso with migrations
-│   │   ├── vector_store.py    # LanceDB + sentence-transformers
-│   │   ├── pipeline.py        # Whisper transcription + embedding pipeline
-│   │   ├── storage_backend.py # Local FS / Cloudflare R2 abstraction
+│   │   ├── main.py            # API routes, middleware, video streaming
+│   │   ├── auth.py            # Session cookie creation and verification
+│   │   ├── config.py          # Environment variable loading
+│   │   ├── database.py        # SQLite setup, migrations, queries
+│   │   ├── vector_store.py    # LanceDB operations, embedding, search
+│   │   ├── pipeline.py        # Whisper transcription and embedding pipeline
+│   │   ├── storage_backend.py # File storage (local or Cloudflare R2)
 │   │   └── schemas.py         # Pydantic response models
-│   ├── storage/               # Local data (gitignored)
+│   ├── storage/               # Local data directory (not committed)
 │   ├── requirements.txt
 │   └── Dockerfile
 └── frontend/
     ├── src/
-    │   ├── components/        # React components (Upload, Search, Player, Gallery)
-    │   ├── api.ts             # API client with credentials
-    │   ├── App.tsx            # Main layout
-    │   └── main.tsx           # Entry point with session init
+    │   ├── components/        # UploadZone, SearchBar, VideoPlayer, VideoGallery, VideoList
+    │   ├── api.ts             # API client that sends session cookies
+    │   ├── App.tsx            # Main three-panel layout
+    │   └── main.tsx           # Entry point, initializes session
     ├── package.json
     ├── vite.config.ts
     └── vercel.json
@@ -194,24 +202,24 @@ clipfinder/
 
 ## Performance
 
-| Metric | Value |
-|--------|-------|
-| Transcription speed | ~1x realtime on CPU (10min video ≈ 10min processing) |
-| Search latency | <100ms (vector similarity + DB join) |
-| Embedding model size | 80MB (all-MiniLM-L6-v2) |
-| Whisper model size | 150MB (base, int8 quantized) |
-| Vector dimensions | 384 (normalized cosine distance) |
+| What | How Fast |
+|------|----------|
+| Transcription | Roughly 1x realtime on CPU (a 10 minute video takes about 10 minutes) |
+| Search | Under 100ms (vector similarity lookup plus database join) |
+| Embedding model | 80MB on disk, runs on CPU |
+| Whisper model | 150MB on disk, int8 quantized for CPU |
+| Vector size | 384 floats per segment |
 
 ---
 
-## Skills Demonstrated
+## What I Built This With
 
-- **Full-Stack Development** — FastAPI backend + React/TypeScript frontend
-- **AI/ML Engineering** — Whisper speech-to-text, sentence-transformers, vector embeddings
-- **System Design** — Multi-user isolation, storage abstraction, background processing
-- **Security Engineering** — Session auth, HMAC signing, input validation, authenticated streaming
-- **DevOps** — Docker, Render, Vercel, Cloudflare R2, environment-based config
-- **Database Design** — SQLite with WAL, indexes, foreign keys, migrations, LanceDB vector store
+- Full-stack development: FastAPI backend with React/TypeScript frontend
+- AI and ML: speech-to-text transcription, semantic text embeddings, vector similarity search
+- System design: multi-user data isolation, storage abstraction layer, background job processing
+- Security: session authentication, HMAC cookie signing, input validation, access-controlled streaming
+- Infrastructure: Docker containerization, Render deployment, Vercel CDN, Cloudflare R2 storage
+- Database design: SQLite with WAL mode, indexed foreign keys, schema migrations, LanceDB vector store
 
 ---
 
