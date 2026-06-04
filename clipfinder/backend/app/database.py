@@ -1,6 +1,6 @@
 """
 Database layer supporting both local SQLite and Turso (libsql) for production.
-Turso free tier: 8GB storage, 1B row reads/month — more than enough.
+Now includes owner_id for user isolation.
 """
 import sqlite3
 import os
@@ -10,22 +10,18 @@ from app.config import settings
 # ─── Connection Setup ─────────────────────────────────────────────────────────
 
 if settings.use_turso:
-    # Use libsql for Turso (SQLite-compatible edge database)
     import libsql_experimental as libsql
 
     def get_connection():
-        """Get a Turso/libsql connection."""
         conn = libsql.connect(
             database=settings.TURSO_DATABASE_URL,
             auth_token=settings.TURSO_AUTH_TOKEN,
         )
         return conn
 else:
-    # Local SQLite for development
     DB_PATH = settings.STORAGE_DIR / "clipfinder.db"
 
     def get_connection() -> sqlite3.Connection:
-        """Create and return a new SQLite connection with row factory."""
         conn = sqlite3.connect(str(DB_PATH))
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
@@ -40,6 +36,7 @@ def init_db() -> None:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS videos (
                 id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
                 filename TEXT NOT NULL,
                 filepath TEXT NOT NULL,
                 duration REAL DEFAULT 0.0,
@@ -58,6 +55,9 @@ def init_db() -> None:
             )
         """)
         conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_videos_owner ON videos(owner_id)
+        """)
+        conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_segments_video_id ON segments(video_id)
         """)
         conn.commit()
@@ -65,5 +65,25 @@ def init_db() -> None:
         conn.close()
 
 
-# Initialize database on module import
+def migrate_db() -> None:
+    """Add owner_id column to existing databases that don't have it."""
+    conn = get_connection()
+    try:
+        # Check if owner_id column exists
+        cursor = conn.execute("PRAGMA table_info(videos)")
+        columns = [row[1] if isinstance(row, tuple) else row["name"] for row in cursor.fetchall()]
+        if "owner_id" not in columns:
+            # Add the column with a default value for existing rows
+            conn.execute("ALTER TABLE videos ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'legacy'")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_owner ON videos(owner_id)")
+            conn.commit()
+            print("[DB] Migrated: added owner_id column to videos table")
+    except Exception as e:
+        print(f"[DB] Migration note: {e}")
+    finally:
+        conn.close()
+
+
+# Initialize and migrate database on module import
 init_db()
+migrate_db()

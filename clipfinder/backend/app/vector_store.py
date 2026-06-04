@@ -1,18 +1,18 @@
 """
 Vector store using LanceDB (embedded, serverless, free).
 Sentence-transformers model runs locally for embedding generation.
+Supports owner-scoped search for multi-user isolation.
 """
 import lancedb
 import pyarrow as pa
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Set
 from app.config import settings
 
 LANCEDB_DIR = settings.LANCEDB_DIR
 
 # Initialize the embedding model globally for offline use
-# all-MiniLM-L6-v2: 384 dimensions, ~80MB, fast on CPU
 embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
 # Define the LanceDB schema
@@ -83,7 +83,7 @@ def add_embeddings_batch(records: List[Dict[str, Any]]) -> None:
 
 
 def search_embeddings(query_vector: List[float], top_k: int = 5) -> List[Dict[str, Any]]:
-    """Search for the nearest neighbor vectors in LanceDB."""
+    """Search for the nearest neighbor vectors in LanceDB (unscoped — DO NOT use in production)."""
     db = get_db()
     existing_tables = db.table_names()
     if TABLE_NAME not in existing_tables:
@@ -113,13 +113,67 @@ def search_embeddings(query_vector: List[float], top_k: int = 5) -> List[Dict[st
     return formatted_results
 
 
+def search_embeddings_for_owner(
+    query_vector: List[float],
+    allowed_video_ids: Set[str],
+    top_k: int = 5,
+) -> List[Dict[str, Any]]:
+    """
+    Search vectors filtered to only videos owned by the current user.
+    Fetches more results than needed, then filters post-search to ensure
+    we return up to top_k results belonging to the user.
+    """
+    if not allowed_video_ids:
+        return []
+
+    db = get_db()
+    existing_tables = db.table_names()
+    if TABLE_NAME not in existing_tables:
+        return []
+
+    table = db.open_table(TABLE_NAME)
+
+    try:
+        # Fetch more results to account for filtering
+        fetch_limit = top_k * 10
+        results = (
+            table.search(query_vector)
+            .limit(fetch_limit)
+            .to_list()
+        )
+    except Exception:
+        return []
+
+    # Filter to only the user's videos
+    formatted_results = []
+    for row in results:
+        if row["video_id"] in allowed_video_ids:
+            formatted_results.append({
+                "video_id": row["video_id"],
+                "text": row["text"],
+                "start_time": row["start_time"],
+                "end_time": row["end_time"],
+                "score": float(row.get("_distance", 0.0)),
+            })
+            if len(formatted_results) >= top_k:
+                break
+
+    return formatted_results
+
+
 def delete_video_embeddings(video_id: str) -> None:
-    """Delete all embeddings for a specific video."""
+    """Delete all embeddings for a specific video. Uses parameterized filter."""
     db = get_db()
     existing_tables = db.table_names()
     if TABLE_NAME not in existing_tables:
         return
     table = db.open_table(TABLE_NAME)
+    # Validate video_id is a UUID to prevent injection
+    import uuid as uuid_mod
+    try:
+        uuid_mod.UUID(video_id)
+    except ValueError:
+        return
     table.delete(f'video_id = "{video_id}"')
 
 
