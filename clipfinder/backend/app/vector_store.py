@@ -1,19 +1,27 @@
 """
 Vector store using LanceDB (embedded, serverless, free).
-Sentence-transformers model runs locally for embedding generation.
-Supports owner-scoped search for multi-user isolation.
+Sentence-transformers model loaded lazily to save memory on free tier.
 """
 import lancedb
 import pyarrow as pa
 from pathlib import Path
-from sentence_transformers import SentenceTransformer
 from typing import List, Dict, Any, Set
 from app.config import settings
 
 LANCEDB_DIR = settings.LANCEDB_DIR
 
-# Initialize the embedding model globally for offline use
-embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+# Lazy-loaded embedding model (only loaded when first needed)
+_embedding_model = None
+
+
+def _get_model():
+    """Load the embedding model on first use to save startup memory."""
+    global _embedding_model
+    if _embedding_model is None:
+        from sentence_transformers import SentenceTransformer
+        _embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+    return _embedding_model
+
 
 # Define the LanceDB schema
 SCHEMA = pa.schema([
@@ -42,13 +50,15 @@ def ensure_table_exists() -> None:
 
 def encode_text(text: str) -> List[float]:
     """Encode a text string into a 384-dimensional vector."""
-    embedding = embedding_model.encode(text, normalize_embeddings=True)
+    model = _get_model()
+    embedding = model.encode(text, normalize_embeddings=True)
     return embedding.tolist()
 
 
 def encode_texts(texts: List[str]) -> List[List[float]]:
     """Encode multiple text strings into vectors."""
-    embeddings = embedding_model.encode(texts, normalize_embeddings=True, batch_size=32)
+    model = _get_model()
+    embeddings = model.encode(texts, normalize_embeddings=True, batch_size=32)
     return embeddings.tolist()
 
 
@@ -83,7 +93,7 @@ def add_embeddings_batch(records: List[Dict[str, Any]]) -> None:
 
 
 def search_embeddings(query_vector: List[float], top_k: int = 5) -> List[Dict[str, Any]]:
-    """Search for the nearest neighbor vectors in LanceDB (unscoped — DO NOT use in production)."""
+    """Search for the nearest neighbor vectors in LanceDB."""
     db = get_db()
     existing_tables = db.table_names()
     if TABLE_NAME not in existing_tables:
@@ -120,8 +130,6 @@ def search_embeddings_for_owner(
 ) -> List[Dict[str, Any]]:
     """
     Search vectors filtered to only videos owned by the current user.
-    Fetches more results than needed, then filters post-search to ensure
-    we return up to top_k results belonging to the user.
     """
     if not allowed_video_ids:
         return []
@@ -134,7 +142,6 @@ def search_embeddings_for_owner(
     table = db.open_table(TABLE_NAME)
 
     try:
-        # Fetch more results to account for filtering
         fetch_limit = top_k * 10
         results = (
             table.search(query_vector)
@@ -144,7 +151,6 @@ def search_embeddings_for_owner(
     except Exception:
         return []
 
-    # Filter to only the user's videos
     formatted_results = []
     for row in results:
         if row["video_id"] in allowed_video_ids:
@@ -162,13 +168,12 @@ def search_embeddings_for_owner(
 
 
 def delete_video_embeddings(video_id: str) -> None:
-    """Delete all embeddings for a specific video. Uses parameterized filter."""
+    """Delete all embeddings for a specific video."""
     db = get_db()
     existing_tables = db.table_names()
     if TABLE_NAME not in existing_tables:
         return
     table = db.open_table(TABLE_NAME)
-    # Validate video_id is a UUID to prevent injection
     import uuid as uuid_mod
     try:
         uuid_mod.UUID(video_id)
