@@ -1,6 +1,6 @@
 """
 Database layer supporting both local SQLite and Turso (libsql) for production.
-Now includes owner_id for user isolation.
+Includes owner_id for user isolation with automatic migration for existing DBs.
 """
 import sqlite3
 import os
@@ -30,13 +30,13 @@ else:
 
 
 def init_db() -> None:
-    """Create tables eagerly at initialization."""
+    """Create tables and run migrations. Safe to call multiple times."""
     conn = get_connection()
     try:
+        # Create tables if they don't exist (fresh install)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS videos (
                 id TEXT PRIMARY KEY,
-                owner_id TEXT NOT NULL,
                 filename TEXT NOT NULL,
                 filepath TEXT NOT NULL,
                 duration REAL DEFAULT 0.0,
@@ -55,35 +55,28 @@ def init_db() -> None:
             )
         """)
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_videos_owner ON videos(owner_id)
-        """)
-        conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_segments_video_id ON segments(video_id)
         """)
         conn.commit()
-    finally:
-        conn.close()
 
-
-def migrate_db() -> None:
-    """Add owner_id column to existing databases that don't have it."""
-    conn = get_connection()
-    try:
-        # Check if owner_id column exists
+        # Migrate: add owner_id if it doesn't exist
         cursor = conn.execute("PRAGMA table_info(videos)")
         columns = [row[1] if isinstance(row, tuple) else row["name"] for row in cursor.fetchall()]
+
         if "owner_id" not in columns:
-            # Add the column with a default value for existing rows
             conn.execute("ALTER TABLE videos ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'legacy'")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_owner ON videos(owner_id)")
             conn.commit()
-            print("[DB] Migrated: added owner_id column to videos table")
-    except Exception as e:
-        print(f"[DB] Migration note: {e}")
+            print("[DB] Migrated: added owner_id column")
+
+        # Now safely create the index (owner_id guaranteed to exist)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_videos_owner ON videos(owner_id)
+        """)
+        conn.commit()
+
     finally:
         conn.close()
 
 
-# Initialize and migrate database on module import
+# Initialize database on module import
 init_db()
-migrate_db()
