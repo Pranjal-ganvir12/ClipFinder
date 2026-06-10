@@ -8,6 +8,6 @@
 
 [[redirects]]
   from = "/api/*"
-  to = "https://clipfinder-api.onrender.com/api/:splat"
+  to = "https://clipfinder-2jir.onrender.com/api/:splat"
   status = 200
   force = true
