@@ -1,0 +1,13 @@
+[build]
+  base = "clipfinder/frontend"
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+[[redirects]]
+  from = "/api/*"
+  to = "https://clipfinder-api.onrender.com/api/:splat"
+  status = 200
+  force = true
