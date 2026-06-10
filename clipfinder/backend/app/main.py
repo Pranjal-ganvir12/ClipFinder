@@ -39,6 +39,7 @@ ALLOWED_ORIGINS = [
     settings.FRONTEND_URL,
     "http://localhost:5173",
     "http://localhost:3000",
+    "https://imaginative-piroshki-e7932d.netlify.app",
 ]
 if settings.is_production:
     # Add specific Vercel URL — do NOT use wildcard with credentials
