@@ -127,7 +127,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173 in your browser.
+Open https://clipfinder.netlify.app in your browser.
 
 ---
 
