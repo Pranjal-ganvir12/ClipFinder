@@ -1,31 +1,25 @@
 """
 Vector store using LanceDB (embedded, serverless, free).
-Sentence-transformers model loaded lazily to save memory on free tier.
+
+NO ML MODEL runs here. All embeddings (segment text AND search queries) are
+computed in the browser with Transformers.js (Xenova/all-MiniLM-L6-v2, mean
+pooling, L2 normalized, 384 dims). This module only STORES the vectors the
+browser sends and runs LanceDB similarity search over them. This is what keeps
+the service within the 512MB Render free tier — importing sentence-transformers
+/ PyTorch here is what used to OOM-crash the instance.
 """
 import lancedb
 import pyarrow as pa
-from pathlib import Path
 from typing import List, Dict, Any, Set
 from app.config import settings
 
 LANCEDB_DIR = settings.LANCEDB_DIR
 
-# Lazy-loaded embedding model (only loaded when first needed)
-_embedding_model = None
-
-
-def _get_model():
-    """Load the embedding model on first use to save startup memory."""
-    global _embedding_model
-    if _embedding_model is None:
-        from sentence_transformers import SentenceTransformer
-        _embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-    return _embedding_model
-
+EMBED_DIM = 384  # Xenova/all-MiniLM-L6-v2
 
 # Define the LanceDB schema
 SCHEMA = pa.schema([
-    pa.field("vector", pa.list_(pa.float32(), 384)),
+    pa.field("vector", pa.list_(pa.float32(), EMBED_DIM)),
     pa.field("video_id", pa.string()),
     pa.field("text", pa.string()),
     pa.field("start_time", pa.float64()),
@@ -82,20 +76,6 @@ def _append_records(records: List[Dict[str, Any]]) -> None:
         table.add(arrow)
     else:
         db.create_table(TABLE_NAME, data=arrow)
-
-
-def encode_text(text: str) -> List[float]:
-    """Encode a text string into a 384-dimensional vector."""
-    model = _get_model()
-    embedding = model.encode(text, normalize_embeddings=True)
-    return embedding.tolist()
-
-
-def encode_texts(texts: List[str]) -> List[List[float]]:
-    """Encode multiple text strings into vectors."""
-    model = _get_model()
-    embeddings = model.encode(texts, normalize_embeddings=True, batch_size=32)
-    return embeddings.tolist()
 
 
 def add_embedding(

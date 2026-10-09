@@ -1,8 +1,6 @@
-numpy>=2.0
-pandas
 fastapi
 uvicorn[standard]
 pydantic
 lancedb>=0.14,<0.22
-sentence-transformers
-gunicorn
+pandas
+numpy>=2.0

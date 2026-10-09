@@ -2,8 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# No ffmpeg / audio-video tooling: transcription now runs in the browser
-# (Transformers.js). The backend only embeds and stores small text segments.
+# No ffmpeg / audio-video tooling and NO ML model: transcription AND embedding
+# now run in the browser (Transformers.js). The backend loads no torch /
+# sentence-transformers; it only stores client-supplied 384-dim vectors and runs
+# LanceDB similarity search, so it fits comfortably in Render's 512MB free tier.
 
 # Install Python dependencies
 COPY requirements.txt .

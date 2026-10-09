@@ -1,29 +1,34 @@
 /**
- * In-browser video transcription using Transformers.js (@huggingface/transformers).
+ * In-browser video processing using Transformers.js (@huggingface/transformers).
  *
- * Why the backend no longer transcribes
- * --------------------------------------
- * The free Render tier (512MB RAM, ephemeral disk) crashes while running
- * faster-whisper, and the restart wipes the SQLite DB. We therefore run
- * Whisper (`Xenova/whisper-tiny.en`) entirely in the browser and only POST
- * small text segments to the backend.
+ * Why the backend no longer runs ML
+ * ---------------------------------
+ * The free Render tier (512MB RAM) OOM-crashed while importing
+ * sentence-transformers / PyTorch to embed segment text, and faster-whisper
+ * before that. The restart wiped state. We therefore run BOTH models in the
+ * browser:
+ *   - Whisper (`Xenova/whisper-tiny.en`) for transcription.
+ *   - MiniLM (`Xenova/all-MiniLM-L6-v2`) for 384-dim sentence embeddings.
+ * The backend only stores the vectors and runs LanceDB similarity search.
  *
- * Threading: inference runs in a WEB WORKER
- * -----------------------------------------
- * Running the model on the main thread froze the tab ("Page Unresponsive" in
- * Chrome) and left the progress bar stuck at 0% because React could never
- * repaint. The split is:
+ * Threading: ALL inference runs in a WEB WORKER
+ * ---------------------------------------------
+ * Running a model on the main thread froze the tab ("Page Unresponsive") and
+ * left progress stuck at 0% because React could never repaint. The split is:
  *   - main thread: decode the file's audio to 16kHz mono (requires
- *     `AudioContext`/`decodeAudioData`, which workers do not have). This is
- *     comparatively fast.
- *   - worker: Whisper inference, the long CPU-bound part. Progress is streamed
- *     back by postMessage so the UI stays interactive and repaints.
- * If the worker cannot be constructed we fall back to main-thread inference so
- * transcription still works, just without the responsiveness benefit.
+ *     `AudioContext`/`decodeAudioData`, which workers do not have).
+ *   - worker: Whisper inference AND MiniLM embedding — the long CPU-bound work.
+ *     Progress is streamed back by postMessage so the UI stays interactive.
+ * A single shared worker is reused for transcription, ingest-embedding and
+ * query-embedding, so both models stay warm after first use. If a worker
+ * cannot be constructed we fall back to main-thread inference so the app still
+ * works, just without the responsiveness benefit.
  */
 
 import {
   runTranscription,
+  runEmbeddings,
+  runQueryEmbedding,
   TARGET_SAMPLE_RATE,
   type ProgressCallback,
   type TranscribeProgress,
@@ -130,63 +135,84 @@ function createProgressPacer(
   };
 }
 
-// --- Worker orchestration ---------------------------------------------------
+// --- Shared worker ----------------------------------------------------------
 
-function createWorker(): Worker | null {
+/**
+ * A single long-lived worker is reused across transcription, ingest-embedding
+ * and query-embedding so both models are loaded once and stay warm. We do NOT
+ * terminate it between jobs. `null` means worker construction failed and the
+ * caller should fall back to the main thread.
+ */
+let sharedWorker: Worker | null = null;
+let workerUnavailable = false;
+
+function getWorker(): Worker | null {
+  if (workerUnavailable) return null;
+  if (sharedWorker) return sharedWorker;
   try {
-    return new Worker(new URL("./transcribe.worker.ts", import.meta.url), {
+    sharedWorker = new Worker(new URL("./transcribe.worker.ts", import.meta.url), {
       type: "module",
     });
+    return sharedWorker;
   } catch {
+    workerUnavailable = true;
+    sharedWorker = null;
     return null;
   }
 }
 
-function transcribeInWorker(
-  worker: Worker,
-  audio: Float32Array,
-  duration: number,
-  onProgress?: ProgressCallback
-): Promise<TranscriptSegment[]> {
-  return new Promise<TranscriptSegment[]>((resolve, reject) => {
-    const pacer = createProgressPacer(duration, (p) => onProgress?.(p));
+/**
+ * Run one request against the shared worker, routing progress to `onProgress`
+ * and resolving when the matching terminal message arrives. If the worker
+ * errors it is torn down so a later call can rebuild it (or fall back).
+ */
+function runWorkerJob<T>(
+  request: WorkerRequest,
+  resultType: WorkerResponse["type"],
+  extract: (msg: WorkerResponse) => T,
+  onProgress?: ProgressCallback,
+  transfer?: Transferable[]
+): Promise<T> {
+  const worker = getWorker();
+  if (!worker) return Promise.reject(new Error("worker unavailable"));
 
-    const cleanup = () => {
-      pacer.stop();
-      worker.onmessage = null;
-      worker.onerror = null;
-      worker.terminate();
-    };
-
-    worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+  return new Promise<T>((resolve, reject) => {
+    const onMessage = (event: MessageEvent<WorkerResponse>) => {
       const msg = event.data;
       if (msg.type === "progress") {
-        if (msg.payload.phase === "transcribe") {
-          // Real chunk progress wins over the estimate; begin pacing once
-          // inference has actually started.
-          pacer.start();
-          pacer.override(msg.payload.progress);
-        } else {
-          onProgress?.(msg.payload);
-        }
-      } else if (msg.type === "result") {
+        onProgress?.(msg.payload);
+      } else if (msg.type === resultType) {
         cleanup();
-        onProgress?.({ phase: "transcribe", progress: 100, message: "Transcribing 100%" });
-        resolve(msg.segments);
+        resolve(extract(msg));
       } else if (msg.type === "error") {
         cleanup();
         reject(new Error(msg.message));
       }
     };
-
-    worker.onerror = (event) => {
+    const onError = (event: ErrorEvent) => {
       cleanup();
-      reject(new Error(event.message || "Transcription worker failed"));
+      // A hard worker error poisons the shared instance; rebuild next time.
+      try {
+        worker.terminate();
+      } catch {
+        /* ignore */
+      }
+      sharedWorker = null;
+      reject(new Error(event.message || "Worker failed"));
+    };
+    const cleanup = () => {
+      worker.removeEventListener("message", onMessage as EventListener);
+      worker.removeEventListener("error", onError as EventListener);
     };
 
-    const request: WorkerRequest = { type: "transcribe", audio, duration };
-    // Transfer the audio buffer so it is moved, not copied.
-    worker.postMessage(request, [audio.buffer]);
+    worker.addEventListener("message", onMessage as EventListener);
+    worker.addEventListener("error", onError as EventListener);
+
+    if (transfer && transfer.length) {
+      worker.postMessage(request, transfer);
+    } else {
+      worker.postMessage(request);
+    }
   });
 }
 
@@ -205,11 +231,31 @@ export async function transcribeFile(
   const { audio, duration } = await decodeAudio(file);
   onProgress?.({ phase: "audio", progress: 100, message: "Audio ready" });
 
-  // 2. Run inference in a worker so the UI stays responsive.
-  const worker = createWorker();
-  if (worker) {
-    const segments = await transcribeInWorker(worker, audio, duration, onProgress);
-    return { segments, duration };
+  // 2. Run inference in the shared worker so the UI stays responsive.
+  if (getWorker()) {
+    const pacer = createProgressPacer(duration, (p) => onProgress?.(p));
+    try {
+      const segments = await runWorkerJob<TranscriptSegment[]>(
+        { type: "transcribe", audio, duration },
+        "result",
+        (msg) => (msg.type === "result" ? msg.segments : []),
+        (p) => {
+          if (p.phase === "transcribe") {
+            pacer.start();
+            pacer.override(p.progress);
+          } else {
+            onProgress?.(p);
+          }
+        },
+        [audio.buffer]
+      );
+      onProgress?.({ phase: "transcribe", progress: 100, message: "Transcribing 100%" });
+      return { segments, duration };
+    } catch {
+      // fall through to main-thread fallback below
+    } finally {
+      pacer.stop();
+    }
   }
 
   // Fallback: no worker available — run on the main thread. The tab will be
@@ -225,4 +271,51 @@ export async function transcribeFile(
   } finally {
     pacer.stop();
   }
+}
+
+/**
+ * Embed segment texts into 384-dim normalized vectors in the worker (MiniLM).
+ * Falls back to the main thread if the worker is unavailable. Returns one
+ * vector per input text, in order.
+ */
+export async function embedSegments(
+  texts: string[],
+  onProgress?: ProgressCallback
+): Promise<number[][]> {
+  if (getWorker()) {
+    try {
+      return await runWorkerJob<number[][]>(
+        { type: "embed", texts },
+        "vectors",
+        (msg) => (msg.type === "vectors" ? msg.vectors : []),
+        onProgress
+      );
+    } catch {
+      // fall through to main thread
+    }
+  }
+  return runEmbeddings(texts, onProgress);
+}
+
+/**
+ * Embed a single search query into a 384-dim normalized vector in the worker.
+ * Falls back to the main thread if the worker is unavailable.
+ */
+export async function embedQuery(
+  text: string,
+  onProgress?: ProgressCallback
+): Promise<number[]> {
+  if (getWorker()) {
+    try {
+      return await runWorkerJob<number[]>(
+        { type: "embed-query", text },
+        "query-vector",
+        (msg) => (msg.type === "query-vector" ? msg.vector : []),
+        onProgress
+      );
+    } catch {
+      // fall through to main thread
+    }
+  }
+  return runQueryEmbedding(text, onProgress);
 }

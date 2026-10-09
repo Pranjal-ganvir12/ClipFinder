@@ -1,11 +1,15 @@
 """
-ClipFinder API Server v4.0 — browser-transcription architecture.
+ClipFinder API Server v5.0 — browser-embedding architecture.
 
-Whisper transcription now runs entirely in the user's browser (Transformers.js).
-The backend NEVER receives the video file and NEVER runs Whisper or ffmpeg. The
-browser posts only small pre-transcribed text segments via POST
-/api/videos/ingest, which the server embeds (sentence-transformers MiniLM) and
-stores for semantic search. Video playback uses a client-side object URL, so the
+Whisper transcription AND text embedding now run entirely in the user's browser
+(Transformers.js: Whisper for transcription, Xenova/all-MiniLM-L6-v2 for 384-dim
+L2-normalized embeddings). The backend NEVER receives the video file, NEVER runs
+Whisper/ffmpeg, and loads NO ML MODEL AT ALL — no sentence-transformers, no
+torch. It is pure vector storage + LanceDB similarity search.
+
+The browser posts pre-transcribed text segments WITH their precomputed vectors
+via POST /api/videos/ingest, and searches via POST /api/search carrying the
+query's precomputed vector. Video playback uses a client-side object URL, so the
 server neither stores nor streams video files.
 
 All data is isolated per anonymous session (secure signed cookie).
@@ -13,18 +17,18 @@ All data is isolated per anonymous session (secure signed cookie).
 import uuid
 import re
 import time
-from typing import List
+import math
+from typing import List, Any
 from collections import defaultdict
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.database import get_connection, init_db
 from app.vector_store import (
-    encode_text,
-    encode_texts,
     add_embeddings_batch,
     search_embeddings_for_owner,
 )
@@ -33,14 +37,17 @@ from app.schemas import (
     VideoIngestRequest,
     VideoIngestResponse,
     VideoStatusResponse,
+    SearchRequest,
     SearchResult,
     SearchResponse,
 )
 
+APP_VERSION = "5.0.0"
+
 app = FastAPI(
     title="ClipFinder",
-    version="4.0.0",
-    description="Private multimodal video search — browser transcription, session-isolated",
+    version=APP_VERSION,
+    description="Private multimodal video search — browser transcription + embedding, session-isolated",
 )
 
 # ─── CORS ─────────────────────────────────────────────────────────────────────
@@ -62,6 +69,41 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "Accept"],
 )
+
+
+# ─── Validation error handler ──────────────────────────────────────────────────
+def _json_safe(obj: Any) -> Any:
+    """Recursively coerce a value into something json.dumps can always encode.
+
+    FastAPI's default validation handler echoes the offending input back in the
+    error detail, and pydantic puts the raising ``ValueError`` object in each
+    error's ``ctx``. Two things can make that detail non-serializable:
+      * non-finite floats (NaN/inf) — invalid JSON that Python's permissive
+        parser still accepts from a malicious client;
+      * arbitrary Python objects such as the ``ValueError`` instance in ``ctx``.
+    We scrub both so adversarial vectors always yield a clean 422, never a 500.
+    """
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, (str, int, bool)) or obj is None:
+        return obj
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    # Anything else (e.g. an exception instance in ctx) -> safe string.
+    return str(obj)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={"detail": _json_safe(exc.errors())},
+    )
+
 
 # ─── Rate Limiting ────────────────────────────────────────────────────────────
 _rate_limit_store: dict = defaultdict(list)
@@ -112,7 +154,7 @@ def sanitize_search_query(query: str) -> str:
 # ─── Health Check ─────────────────────────────────────────────────────────────
 @app.get("/api/health")
 async def health_check():
-    return {"status": "healthy", "version": "4.0.0"}
+    return {"status": "healthy", "version": APP_VERSION}
 
 
 # ─── Session Init ─────────────────────────────────────────────────────────────
@@ -143,15 +185,15 @@ async def upload_video_gone():
     )
 
 
-# ─── Ingest pre-transcribed segments ──────────────────────────────────────────
+# ─── Ingest pre-transcribed, pre-embedded segments ─────────────────────────────
 @app.post("/api/videos/ingest", response_model=VideoIngestResponse)
 async def ingest_video(request: Request, payload: VideoIngestRequest):
-    """Accept browser-produced transcript segments for a video.
+    """Accept browser-produced transcript segments WITH their precomputed vectors.
 
     Creates a 'completed' video row owned by this session, stores the segments,
-    embeds each segment's TEXT with the MiniLM model (batched — cheap and
-    memory-safe on 512MB), and adds the vectors to LanceDB. The video file is
-    NOT uploaded; it stays in the browser as a client-side object URL.
+    and adds the CLIENT-SUPPLIED 384-dim vectors to LanceDB. The backend loads
+    no ML model and performs no embedding. The video file is NOT uploaded; it
+    stays in the browser as a client-side object URL.
     """
     client_ip = request.client.host if request.client else "unknown"
     if not check_rate_limit(client_ip, settings.RATE_LIMIT_MAX_INGESTS):
@@ -162,24 +204,26 @@ async def ingest_video(request: Request, payload: VideoIngestRequest):
     clean_filename = sanitize_filename(payload.filename)
     video_id = str(uuid.uuid4())
 
-    # Pydantic already validated/stripped segments (non-empty, bounded count &
-    # text length). Build the DB rows and the list of texts to embed.
+    # Pydantic already validated/stripped segments (non-empty text, bounded
+    # count & text length, exactly-384 finite vectors). Build DB rows + the
+    # LanceDB vector records directly from the client payload — no embedding.
     segment_rows = []
-    texts: List[str] = []
+    vector_records = []
     for seg in payload.segments:
+        seg_db_id = str(uuid.uuid4())
         segment_rows.append({
-            "id": str(uuid.uuid4()),
+            "id": seg_db_id,
             "text": seg.text,
             "start_time": float(seg.start),
             "end_time": float(seg.end),
         })
-        texts.append(seg.text)
-
-    # Batch-embed all segment texts in a single encode call.
-    try:
-        vectors = encode_texts(texts)
-    except Exception:
-        raise HTTPException(status_code=500, detail="Failed to embed segments")
+        vector_records.append({
+            "vector": seg.vector,
+            "video_id": video_id,
+            "text": seg.text,
+            "start_time": float(seg.start),
+            "end_time": float(seg.end),
+        })
 
     # Persist video + segments. status='completed' immediately (no async job).
     # filepath is empty: the server stores no video files.
@@ -202,20 +246,10 @@ async def ingest_video(request: Request, payload: VideoIngestRequest):
     finally:
         conn.close()
 
-    # Add vectors to LanceDB (best-effort). If this fails, the rows still exist
-    # and search degrades gracefully to empty rather than 500ing.
+    # Add client vectors to LanceDB (best-effort). If this fails, the rows still
+    # exist and search degrades gracefully to empty rather than 500ing.
     try:
-        records = [
-            {
-                "vector": vec,
-                "video_id": video_id,
-                "text": row["text"],
-                "start_time": row["start_time"],
-                "end_time": row["end_time"],
-            }
-            for row, vec in zip(segment_rows, vectors)
-        ]
-        add_embeddings_batch(records)
+        add_embeddings_batch(vector_records)
     except Exception:
         print(f"[Ingest] Warning: failed to add embeddings for video {video_id}")
 
@@ -268,17 +302,35 @@ async def get_video_status(request: Request, video_id: str):
         conn.close()
 
 
-# ─── Search ───────────────────────────────────────────────────────────────────
-@app.get("/api/search", response_model=SearchResponse)
-async def search_videos(request: Request, q: str):
-    """Search only within this user's videos."""
+# ─── Search (moved GET → POST so the 384-dim query vector fits in the body) ─────
+@app.get("/api/search")
+async def search_videos_gone():
+    """Search moved from GET to POST.
+
+    A 384-dim float query vector cannot live in a query string, so search now
+    takes a JSON body on POST /api/search. An old cached frontend still issuing
+    GET /api/search gets a loud 410 instead of a mysterious failure.
+    """
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "GET /api/search is retired. Search moved to POST /api/search with a "
+            "JSON body {query, vector(384 floats), top_k?} — the browser now "
+            "computes the query embedding (Xenova/all-MiniLM-L6-v2)."
+        ),
+    )
+
+
+@app.post("/api/search", response_model=SearchResponse)
+async def search_videos(request: Request, payload: SearchRequest):
+    """Search only within this user's videos using the client-supplied query vector."""
     client_ip = request.client.host if request.client else "unknown"
     if not check_rate_limit(client_ip, settings.RATE_LIMIT_MAX_SEARCHES):
         raise HTTPException(status_code=429, detail="Too many searches. Please wait.")
 
     session_id, is_new = get_or_create_session(request)
 
-    clean_query = sanitize_search_query(q)
+    clean_query = sanitize_search_query(payload.query)
     if not clean_query:
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
@@ -300,11 +352,12 @@ async def search_videos(request: Request, q: str):
             set_session_cookie(response, session_id)
         return response
 
-    # encode + vector search both degrade to empty on any backend fault, so a
-    # wiped/missing LanceDB dir yields [] instead of a 500.
+    # Vector search degrades to empty on any backend fault, so a wiped/missing
+    # LanceDB dir yields [] instead of a 500.
     try:
-        query_vector = encode_text(clean_query)
-        vector_results = search_embeddings_for_owner(query_vector, user_video_ids, top_k=5)
+        vector_results = search_embeddings_for_owner(
+            payload.vector, user_video_ids, top_k=payload.top_k
+        )
     except Exception:
         vector_results = []
 

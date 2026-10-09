@@ -1,14 +1,6 @@
 import React, { useState } from "react";
-import { apiFetch } from "../api";
-
-interface SearchResult {
-  video_id: string;
-  filename: string;
-  text: string;
-  start_time: number;
-  end_time: number;
-  score: number;
-}
+import { searchVideos, type SearchResult } from "../api";
+import { embedQuery, type TranscribeProgress } from "../transcribe";
 
 interface SearchBarProps {
   onResults: (results: SearchResult[]) => void;
@@ -17,32 +9,39 @@ interface SearchBarProps {
 const SearchBar: React.FC<SearchBarProps> = ({ onResults }) => {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!query.trim()) return;
+    const q = query.trim();
+    if (!q) return;
 
     setLoading(true);
     setError(null);
+    setStatus("Preparing search…");
 
     try {
-      const response = await apiFetch(
-        `/api/search?q=${encodeURIComponent(query.trim())}`
-      );
+      // Embed the query IN THE BROWSER. The model is shared with ingest, so it
+      // is usually already warm; if this is the first use it downloads here and
+      // we surface a clear "Loading search model" status.
+      const vector = await embedQuery(q, (p: TranscribeProgress) => {
+        if (p.phase === "model") {
+          setStatus(p.message);
+        } else {
+          setStatus("Searching…");
+        }
+      });
 
-      if (!response.ok) {
-        const errData = await response.json().catch(() => null);
-        throw new Error(errData?.detail || "Search failed");
-      }
-
-      const data = await response.json();
-      onResults(data.results || []);
+      setStatus("Searching…");
+      const results = await searchVideos(q, vector);
+      onResults(results);
     } catch (err: any) {
-      setError(err.message || "Search failed. Please try again.");
+      setError(err?.message || "Search failed. Please try again.");
       onResults([]);
     } finally {
       setLoading(false);
+      setStatus(null);
     }
   };
 
@@ -70,6 +69,7 @@ const SearchBar: React.FC<SearchBarProps> = ({ onResults }) => {
           <button
             type="submit"
             disabled={loading || !query.trim()}
+            aria-busy={loading}
             className="btn-primary disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap"
           >
             {loading ? (
@@ -86,8 +86,15 @@ const SearchBar: React.FC<SearchBarProps> = ({ onResults }) => {
           </button>
         </div>
       </form>
+      {status && !error && (
+        <p className="mt-3 text-[13px] text-action-blue" aria-live="polite">
+          {status}
+        </p>
+      )}
       {error && (
-        <p className="mt-3 text-[13px] text-[#b30000]">{error}</p>
+        <p className="mt-3 text-[13px] text-[#b30000]" aria-live="assertive">
+          {error}
+        </p>
       )}
     </div>
   );

@@ -40,6 +40,7 @@ export interface IngestSegment {
   text: string;
   start: number;
   end: number;
+  vector: number[];
 }
 
 export interface IngestResponse {
@@ -49,15 +50,35 @@ export interface IngestResponse {
   segment_count: number;
 }
 
+export const EMBED_DIM = 384;
+
+function assertVector(vector: number[], label: string): void {
+  if (
+    !Array.isArray(vector) ||
+    vector.length !== EMBED_DIM ||
+    vector.some((v) => typeof v !== "number" || !Number.isFinite(v))
+  ) {
+    throw new Error(
+      `${label} must be ${EMBED_DIM} finite numbers (got ${
+        Array.isArray(vector) ? vector.length : typeof vector
+      }).`
+    );
+  }
+}
+
 /**
- * Upload browser-produced transcript segments for a video. The video file
- * itself is NOT uploaded — only this small JSON payload.
+ * Upload browser-produced transcript segments (with 384-dim embedding vectors)
+ * for a video. The video file itself is NOT uploaded — only this small JSON
+ * payload. Every vector is validated to be 384 finite numbers before sending,
+ * because the backend rejects a wrong length.
  */
 export async function ingestVideo(
   filename: string,
   duration: number,
   segments: IngestSegment[]
 ): Promise<IngestResponse> {
+  segments.forEach((s, i) => assertVector(s.vector, `Segment ${i} vector`));
+
   const res = await apiFetch("/api/videos/ingest", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -68,4 +89,48 @@ export async function ingestVideo(
     throw new Error(errData?.detail || "Failed to index video");
   }
   return (await res.json()) as IngestResponse;
+}
+
+export interface SearchResult {
+  video_id: string;
+  filename: string;
+  text: string;
+  start_time: number;
+  end_time: number;
+  score: number;
+}
+
+export interface SearchResponse {
+  query: string;
+  results: SearchResult[];
+}
+
+/**
+ * Search by a browser-computed 384-dim query vector. The query text is sent
+ * only for echo/display; similarity is computed by the backend over the vector.
+ */
+export async function searchVideos(
+  query: string,
+  vector: number[],
+  topK?: number
+): Promise<SearchResult[]> {
+  assertVector(vector, "Query vector");
+
+  const body: { query: string; vector: number[]; top_k?: number } = {
+    query,
+    vector,
+  };
+  if (typeof topK === "number") body.top_k = topK;
+
+  const res = await apiFetch("/api/search", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const errData = await res.json().catch(() => null);
+    throw new Error(errData?.detail || "Search failed");
+  }
+  const data = (await res.json()) as SearchResponse;
+  return data.results || [];
 }

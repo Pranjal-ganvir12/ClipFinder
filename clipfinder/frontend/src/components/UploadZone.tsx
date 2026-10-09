@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef } from "react";
-import { ingestVideo } from "../api";
-import { transcribeFile, type TranscribeProgress } from "../transcribe";
+import { ingestVideo, EMBED_DIM, type IngestSegment } from "../api";
+import { transcribeFile, embedSegments, type TranscribeProgress } from "../transcribe";
 import { registerLocalVideo } from "../videoStore";
 
 interface ProcessedVideo {
@@ -41,17 +41,38 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
       // 1. Transcribe entirely in the browser.
       const { segments, duration } = await transcribeFile(file, (p) => setProgress(p));
 
-      // 2. Upload only the small text segments.
-      setProgress({ phase: "transcribe", progress: 100, message: "Indexing…" });
-      const ingestSegments = segments
+      // 2. Keep only non-empty segments; embed each one IN THE BROWSER.
+      const cleanSegments = segments
         .map((s) => ({ text: s.text.trim(), start: s.start, end: s.end }))
         .filter((s) => s.text.length > 0);
 
-      if (ingestSegments.length === 0) {
+      if (cleanSegments.length === 0) {
         // Backend requires >=1 segment; a silent video has no speech to index.
         throw new Error("No speech detected in this video — nothing to index.");
       }
 
+      // 3. Embed every segment in the browser (shared worker + model). This
+      //    reports an "embed" phase so the UI never looks stuck ("Indexing N%").
+      setProgress({ phase: "embed", progress: 0, message: "Indexing 0%" });
+      const vectors = await embedSegments(
+        cleanSegments.map((s) => s.text),
+        (p) => setProgress(p)
+      );
+
+      // 4. Pair each segment with its 384-dim vector; guard the length so a
+      //    bad vector is never sent (api.ts also validates before POST).
+      const ingestSegments: IngestSegment[] = cleanSegments.map((s, i) => {
+        const vector = vectors[i];
+        if (!vector || vector.length !== EMBED_DIM) {
+          throw new Error(
+            `Segment ${i} produced ${vector ? vector.length : 0} values ` +
+              `(expected ${EMBED_DIM}).`
+          );
+        }
+        return { text: s.text, start: s.start, end: s.end, vector };
+      });
+
+      setProgress({ phase: "embed", progress: 100, message: "Uploading index…" });
       const result = await ingestVideo(file.name, duration, ingestSegments);
 
       // 3. Bind the local object URL to the server-assigned video_id so
@@ -120,6 +141,7 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onClick={() => !busy && fileInputRef.current?.click()}
+        aria-busy={busy}
         className={`
           border border-dashed rounded-sm p-5 text-center transition-all duration-200
           ${busy ? "cursor-default" : "cursor-pointer"}
@@ -144,10 +166,17 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>
-              <p className="text-[13px] text-action-blue font-medium">
+              <p className="text-[13px] text-action-blue font-medium" aria-live="polite">
                 {progress?.message || "Working…"}
               </p>
-              <div className="w-full h-1 bg-soft-stone rounded-full overflow-hidden">
+              <div
+                className="w-full h-1 bg-soft-stone rounded-full overflow-hidden"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={progressPct}
+                aria-label={progress?.message || "Processing"}
+              >
                 <div
                   className="h-full bg-action-blue transition-all duration-200"
                   style={{ width: `${progressPct}%` }}

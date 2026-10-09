@@ -10,6 +10,7 @@ import {
   pipeline,
   env,
   type AutomaticSpeechRecognitionPipeline,
+  type FeatureExtractionPipeline,
 } from "@huggingface/transformers";
 
 // Pull models from the Hugging Face CDN, never a local /models path.
@@ -17,6 +18,13 @@ env.allowLocalModels = false;
 env.useBrowserCache = true;
 
 export const MODEL_ID = "Xenova/whisper-tiny.en";
+/**
+ * Sentence-embedding model. Produces 384-dim normalized vectors, matching the
+ * LanceDB schema used by the backend. The backend loads NO ML model anymore —
+ * all embeddings are computed here in the browser.
+ */
+export const EMBED_MODEL_ID = "Xenova/all-MiniLM-L6-v2";
+export const EMBED_DIM = 384;
 export const TARGET_SAMPLE_RATE = 16000;
 
 export interface TranscriptSegment {
@@ -25,7 +33,7 @@ export interface TranscriptSegment {
   end: number;
 }
 
-export type TranscribePhase = "model" | "audio" | "transcribe";
+export type TranscribePhase = "model" | "audio" | "transcribe" | "embed";
 
 export interface TranscribeProgress {
   phase: TranscribePhase;
@@ -78,6 +86,107 @@ export async function getPipeline(
     asrPipelinePromise = null;
     throw err;
   }
+}
+
+// --- Embedding model singleton ----------------------------------------------
+
+let embedPipelinePromise: Promise<FeatureExtractionPipeline> | null = null;
+
+/**
+ * Lazily load (and cache) the feature-extraction pipeline. First call downloads
+ * the model (~25MB, cached by the browser); later calls resolve instantly. The
+ * same instance is reused for ingest AND search, so after an upload the model
+ * is already warm when the user searches.
+ */
+export async function getEmbedPipeline(
+  onProgress?: ProgressCallback
+): Promise<FeatureExtractionPipeline> {
+  if (embedPipelinePromise) {
+    onProgress?.({ phase: "model", progress: 100, message: "Search model ready" });
+    return embedPipelinePromise;
+  }
+
+  embedPipelinePromise = pipeline("feature-extraction", EMBED_MODEL_ID, {
+    progress_callback: (data: unknown) => {
+      if (!onProgress) return;
+      const d = data as { status?: string; progress?: number };
+      if (d.status === "progress" && typeof d.progress === "number") {
+        const pct = Math.max(0, Math.min(100, Math.round(d.progress)));
+        onProgress({
+          phase: "model",
+          progress: pct,
+          message: `Loading search model ${pct}%`,
+        });
+      } else if (d.status === "ready" || d.status === "done") {
+        onProgress({ phase: "model", progress: 100, message: "Search model ready" });
+      } else {
+        onProgress({ phase: "model", progress: 0, message: "Loading search model…" });
+      }
+    },
+  }) as Promise<FeatureExtractionPipeline>;
+
+  try {
+    return await embedPipelinePromise;
+  } catch (err) {
+    // Allow a later retry to re-attempt the download.
+    embedPipelinePromise = null;
+    throw err;
+  }
+}
+
+/**
+ * Embed a single text into a 384-element normalized number array using mean
+ * pooling. Throws if the output is not exactly `EMBED_DIM` numbers so a bad
+ * vector is never sent to the backend.
+ */
+export async function embedText(
+  extractor: FeatureExtractionPipeline,
+  text: string
+): Promise<number[]> {
+  const output = await extractor(text, { pooling: "mean", normalize: true });
+  const vector = Array.from(output.data as Iterable<number>, (v) => Number(v));
+  if (vector.length !== EMBED_DIM || vector.some((v) => !Number.isFinite(v))) {
+    throw new Error(
+      `Embedding produced ${vector.length} values (expected ${EMBED_DIM}).`
+    );
+  }
+  return vector;
+}
+
+/**
+ * Embed many texts, looping one at a time (all-MiniLM is cheap per-call and a
+ * loop keeps peak memory low). Reports best-effort progress via the "embed"
+ * phase. Returns one 384-dim vector per input, in order.
+ */
+export async function runEmbeddings(
+  texts: string[],
+  onProgress?: ProgressCallback
+): Promise<number[][]> {
+  const extractor = await getEmbedPipeline(onProgress);
+
+  const vectors: number[][] = [];
+  const total = texts.length;
+  onProgress?.({ phase: "embed", progress: 0, message: "Indexing 0%" });
+
+  for (let i = 0; i < total; i++) {
+    vectors.push(await embedText(extractor, texts[i]));
+    const pct = total > 0 ? Math.min(99, Math.round(((i + 1) / total) * 100)) : 100;
+    onProgress?.({ phase: "embed", progress: pct, message: `Indexing ${pct}%` });
+  }
+
+  onProgress?.({ phase: "embed", progress: 100, message: "Indexing 100%" });
+  return vectors;
+}
+
+/**
+ * Embed a single query string to a 384-dim vector (used by search).
+ */
+export async function runQueryEmbedding(
+  text: string,
+  onProgress?: ProgressCallback
+): Promise<number[]> {
+  const extractor = await getEmbedPipeline(onProgress);
+  return embedText(extractor, text);
 }
 
 /**
