@@ -1,9 +1,23 @@
 # Render.com Blueprint - Infrastructure as Code
-# Deploy with: Connect GitHub repo to Render, it auto-detects this file
-# Free tier: 750 hours/month, 512MB RAM, spins down after 15min inactivity
+# Deploy with: Connect GitHub repo to Render, it auto-detects this file.
+# Free tier: 750 hours/month, 512MB RAM, spins down after 15min inactivity.
+#
+# IMPORTANT: Render FREE web services have NO persistent disk. /app/storage is
+# ephemeral and is wiped on every restart/redeploy/cold-start. To persist data
+# across restarts, configure the TURSO_* env vars below (free Turso tier) — the
+# SQLite video/segment rows then live in Turso instead of the ephemeral file.
+# LanceDB vectors remain local/ephemeral; search degrades gracefully (empty
+# results) after a wipe and is re-populated as clients re-ingest.
 
 services:
   - type: web
+    # ⚠️  The LIVE service is "clipfinder-2jir" (https://clipfinder-2jir.onrender.com),
+    #     which is the URL both netlify.toml and vercel.json proxy /api/* to.
+    #     The name below is only used when creating a NEW service from this
+    #     blueprint. Do NOT create a new service to deploy a fix — redeploy the
+    #     EXISTING clipfinder-2jir service, otherwise you get a different
+    #     hostname and the frontend proxies will 404.
+    #     (https://clipfinder-api.onrender.com is dead and returns 404.)
     name: clipfinder-api
     runtime: docker
     dockerfilePath: ./clipfinder/backend/Dockerfile
@@ -14,20 +28,16 @@ services:
       - key: CLIPFINDER_ENV
         value: production
       - key: FRONTEND_URL
-        sync: false  # Set this to your Vercel URL after deploying frontend
+        sync: false  # Set to your Netlify/Vercel URL after deploying frontend
       - key: SESSION_SECRET
-        sync: false  # Generate with: python -c "import secrets; print(secrets.token_hex(32))"
-      - key: R2_ACCOUNT_ID
+        sync: false  # REQUIRED in prod. Generate: python -c "import secrets; print(secrets.token_hex(32))"
+      # ─── Turso (free tier) — persists videos/segments across restarts ────────
+      # Leave unset to fall back to EPHEMERAL local SQLite (wiped on restart).
+      - key: TURSO_DATABASE_URL
         sync: false
-      - key: R2_ACCESS_KEY_ID
+      - key: TURSO_AUTH_TOKEN
         sync: false
-      - key: R2_SECRET_ACCESS_KEY
-        sync: false
-      - key: R2_BUCKET_NAME
-        value: clipfinder-videos
-      - key: R2_PUBLIC_URL
-        sync: false
-    disk:
-      name: clipfinder-storage
-      mountPath: /app/storage
-      sizeGB: 1  # Free tier includes 1GB persistent disk
+# NOTE: The previous `disk:` block was removed — Render free web services ignore
+# persistent disks, so it was misleading. R2_* vars were removed because the
+# server no longer stores or streams video files (playback uses local browser
+# object URLs; transcription is client-side).

@@ -11,11 +11,25 @@ import os
 from fastapi import Request, Response
 from app.config import settings
 
-# Secret key for signing session cookies
-SESSION_SECRET = os.getenv(
-    "SESSION_SECRET",
-    hashlib.sha256(f"clipfinder-local-{settings.STORAGE_DIR}".encode()).hexdigest()
-)
+# ─── Secret key for signing session cookies ──────────────────────────────────
+# In production SESSION_SECRET is REQUIRED. Previously this fell back to a
+# secret derived from STORAGE_DIR, which is a fixed, guessable path on Render
+# (/app/storage) — anyone could derive it and forge session cookies to read or
+# write another visitor's data. Fail fast instead of starting up insecurely.
+_env_secret = os.getenv("SESSION_SECRET", "").strip()
+
+if settings.is_production and not _env_secret:
+    raise RuntimeError(
+        "SESSION_SECRET is required when CLIPFINDER_ENV=production. "
+        "Without it, session cookies are signed with a guessable key derived "
+        "from the storage path and can be forged. "
+        'Generate one with: python -c "import secrets; print(secrets.token_hex(32))" '
+        "and set it in your host's environment variables."
+    )
+
+SESSION_SECRET = _env_secret or hashlib.sha256(
+    f"clipfinder-local-{settings.STORAGE_DIR}".encode()
+).hexdigest()
 
 COOKIE_NAME = "clipfinder_session"
 COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # 1 year

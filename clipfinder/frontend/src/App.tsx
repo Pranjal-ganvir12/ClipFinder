@@ -4,22 +4,28 @@ import SearchBar from "./components/SearchBar";
 import VideoPlayer from "./components/VideoPlayer";
 import VideoGallery from "./components/VideoGallery";
 import VideoList from "./components/VideoList";
+import { getLocalVideoUrl } from "./videoStore";
 
-interface SearchResult {
+export interface SearchResult {
   video_id: string;
   filename: string;
-  filepath: string;
   text: string;
   start_time: number;
   end_time: number;
   score: number;
 }
 
+interface ActiveVideo {
+  video_id: string;
+  filename: string;
+  url: string | null;
+}
+
 const App: React.FC = () => {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
-  const [activeVideo, setActiveVideo] = useState<{ filepath: string; filename: string } | null>(null);
+  const [activeVideo, setActiveVideo] = useState<ActiveVideo | null>(null);
   const [activeStartTime, setActiveStartTime] = useState<number | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
 
@@ -31,7 +37,11 @@ const App: React.FC = () => {
 
   const handleSelect = useCallback((result: SearchResult) => {
     setSelectedIndex(results.indexOf(result));
-    setActiveVideo({ filepath: result.filepath, filename: result.filename });
+    setActiveVideo({
+      video_id: result.video_id,
+      filename: result.filename,
+      url: getLocalVideoUrl(result.video_id),
+    });
     setActiveStartTime(result.start_time);
   }, [results]);
 
@@ -39,8 +49,12 @@ const App: React.FC = () => {
     setRefreshTrigger((prev) => prev + 1);
   }, []);
 
-  const handleSelectVideo = useCallback((filepath: string, filename: string) => {
-    setActiveVideo({ filepath, filename });
+  const handleSelectVideo = useCallback((videoId: string, filename: string) => {
+    setActiveVideo({
+      video_id: videoId,
+      filename,
+      url: getLocalVideoUrl(videoId),
+    });
     setActiveStartTime(0);
   }, []);
 
@@ -49,9 +63,9 @@ const App: React.FC = () => {
       {/* Announcement Bar */}
       <div className="bg-primary text-white text-center py-2 px-4">
         <p className="text-[12px] tracking-wide">
-          <span className="text-muted">100% local AI</span>
+          <span className="text-muted">Browser-side AI</span>
           <span className="mx-2 text-muted">·</span>
-          <span className="text-white/90">No cloud APIs. Your videos never leave your machine.</span>
+          <span className="text-white/90">Transcription runs in your browser. Only text is sent to the server.</span>
         </p>
       </div>
 
@@ -66,7 +80,7 @@ const App: React.FC = () => {
           </div>
         </div>
         <div className="flex items-center gap-6">
-          <span className="text-[12px] font-mono text-muted tracking-wider uppercase">Local Engine</span>
+          <span className="text-[12px] font-mono text-muted tracking-wider uppercase">Browser Engine</span>
           <div className="flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
             <span className="text-[12px] text-slate">Active</span>
@@ -98,9 +112,10 @@ const App: React.FC = () => {
           {/* Player */}
           <div className="flex-1 p-6 min-h-0">
             <VideoPlayer
-              filepath={activeVideo?.filepath || null}
+              url={activeVideo?.url ?? null}
               startTime={activeStartTime}
-              filename={activeVideo?.filename || null}
+              filename={activeVideo?.filename ?? null}
+              sourceMissing={activeVideo != null && activeVideo.url == null}
             />
           </div>
         </main>

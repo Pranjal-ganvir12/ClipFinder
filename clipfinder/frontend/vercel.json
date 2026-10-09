@@ -5,7 +5,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://clipfinder-api.onrender.com/api/:path*"
+      "destination": "https://clipfinder-2jir.onrender.com/api/:path*"
     }
   ]
 }

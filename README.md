@@ -1,109 +1,105 @@
 # ClipFinder
 
-A full-stack AI video search engine. Upload any video, ask questions in plain English, and jump to the exact moment in the video where that topic is discussed.
+An AI video search engine. Upload a video, let your **browser** transcribe it, then
+search the transcript in plain English and jump to the exact moment a topic is
+discussed.
 
-Built with FastAPI, React, Whisper (speech-to-text), sentence-transformers (semantic embeddings), and LanceDB (vector search). Runs 100% locally on CPU with no paid API keys required. Can also be deployed publicly for free using Render, Vercel, and Cloudflare R2.
+Built with React + Transformers.js (in-browser Whisper), FastAPI,
+sentence-transformers (semantic embeddings), and LanceDB (vector search).
+Designed to run on **100% free hosting** — the transcription that used to crash
+the free backend now runs client-side.
 
-![Python](https://img.shields.io/badge/Python-FastAPI-009688?style=flat-square&logo=fastapi)
 ![React](https://img.shields.io/badge/React-TypeScript-61DAFB?style=flat-square&logo=react)
-![AI](https://img.shields.io/badge/AI-Whisper%20%2B%20Transformers-FF6F00?style=flat-square)
-![Deploy](https://img.shields.io/badge/Deploy-Render%20%2B%20Vercel-000?style=flat-square)
+![Python](https://img.shields.io/badge/Python-FastAPI-009688?style=flat-square&logo=fastapi)
+![AI](https://img.shields.io/badge/AI-Transformers.js%20%2B%20MiniLM-FF6F00?style=flat-square)
+![Deploy](https://img.shields.io/badge/Deploy-Netlify%20%2B%20Render-000?style=flat-square)
 
 ---
 
-## What It Does
+## How It Works (new architecture)
 
-1. You upload a video (MP4, WebM, MOV, AVI)
-2. The backend extracts the audio and transcribes it into timestamped text segments using OpenAI's Whisper model running locally
-3. Each text segment gets converted into a 384-dimensional vector using a sentence-transformer model
-4. These vectors are stored in LanceDB for fast similarity search
-5. When you search (for example, "explains the sorting algorithm"), your query is also converted to a vector
-6. The system finds the segments most similar to your query and returns them with timestamps
-7. You click a result and the video player jumps to that exact second
+1. You pick a video in the browser. It is **never uploaded** — it stays local as
+   an object URL for playback.
+2. The browser decodes the audio and runs **Whisper (`Xenova/whisper-tiny.en`)
+   via Transformers.js**, producing timestamped text segments. The model
+   downloads once and is cached by the browser.
+3. The browser POSTs only the small JSON transcript to `POST /api/videos/ingest`.
+4. The backend embeds each segment's **text** with sentence-transformers
+   (`all-MiniLM-L6-v2`, 384-dim) and stores it in SQLite + LanceDB.
+5. When you search, your query is embedded and matched against the stored
+   segment vectors; results come back with timestamps.
+6. Clicking a result seeks the locally-held video to that exact second.
+
+### Why it changed
+
+The old design transcribed on the server with faster-whisper. On the Render
+free tier (512MB RAM, ephemeral disk) that **crashed**, and the restart wiped
+the SQLite DB so the video row vanished ("Video not found") and uploads hung on
+"Queued" forever. Moving Whisper into the browser means the free backend only
+handles tiny text payloads, so it stays within memory and never needs to touch
+a video file.
 
 ---
 
-## Features
+## What persists and what does not
 
-- Natural language search across all video content with timestamp precision
-- AI transcription pipeline (Whisper base model, CPU, int8 quantized)
-- Semantic vector search (not keyword matching, actual meaning-based search)
-- Multi-user session isolation so each person only sees their own uploaded videos
-- Authenticated video streaming (videos are served through ownership-verified endpoints)
-- Signed session cookies (HMAC-SHA256, HttpOnly, Secure in production)
-- File validation (type checking, size limits, filename sanitization)
-- Rate limiting (5 uploads per minute, 30 searches per minute per IP)
-- Path traversal and injection prevention on all inputs
-- Free deployment on Render + Vercel + Cloudflare R2
-- Works fully offline on your local machine with zero external dependencies
+This matters on free hosting — be honest with yourself about it:
+
+- **Transcript + embeddings**: stored server-side. Persist across restarts
+  **only if** Turso is configured (`TURSO_*` env vars). With the default local
+  SQLite + LanceDB on Render free, they live on **ephemeral disk** and are
+  **wiped on every restart/redeploy/cold-start**. Search degrades gracefully to
+  empty after a wipe and refills as clients re-ingest.
+- **The video file**: never leaves the browser. It plays from a client-side
+  `URL.createObjectURL` and is only available **during the session you uploaded
+  it in**. After a page refresh the transcript is still searchable, but the
+  player shows a "video source unavailable — re-upload to watch" message instead
+  of a broken element.
 
 ---
 
 ## Tech Stack
 
-| Layer | Technology | What It Does |
-|-------|-----------|--------------|
-| Backend API | FastAPI, Python 3.11 | Handles uploads, search, video streaming, auth |
-| Speech to Text | faster-whisper (base model, int8) | Converts video audio into timestamped text |
-| Text Embeddings | sentence-transformers (all-MiniLM-L6-v2) | Converts text into 384-dimensional vectors |
-| Vector Database | LanceDB (embedded, serverless) | Stores and searches vectors by similarity |
-| Relational Database | SQLite with WAL mode | Stores video metadata, transcripts, ownership |
-| Object Storage | Local filesystem or Cloudflare R2 | Stores the actual video files |
-| Frontend | React 18, TypeScript, Tailwind CSS, Vite | User interface with upload, search, and playback |
-| Authentication | HMAC-signed session cookies | User isolation without requiring signup |
-| Deployment | Docker, Render.com, Vercel | Production hosting from GitHub push |
+| Layer | Technology | Role |
+|-------|-----------|------|
+| In-browser STT | Transformers.js (`Xenova/whisper-tiny.en`, WASM) | Transcribes audio client-side |
+| Frontend | React 18, TypeScript, Tailwind, Vite | Upload, transcribe, search, playback |
+| Backend API | FastAPI, Python 3.11 | Ingest segments, embed, search |
+| Text embeddings | sentence-transformers (`all-MiniLM-L6-v2`) | 384-dim segment vectors |
+| Vector search | LanceDB (embedded) | Similarity search |
+| Metadata DB | SQLite (local) or Turso/libsql (persistent) | Video + segment rows, ownership |
+| Auth | HMAC-signed session cookies | Per-session isolation, no signup |
+| Hosting | Netlify (frontend) + Render (backend) | Free tier |
 
 ---
 
-## Architecture
+## API
 
-```
-User Browser
-    |
-    |--- Upload video
-    |--- Search query ("talks about design patterns")
-    |--- Click result to play from timestamp
-    |
-    v
-FastAPI Backend (Python)
-    |
-    |--- POST /api/upload
-    |       Saves file, creates DB record, starts background transcription
-    |
-    |--- GET /api/search?q=...
-    |       Encodes query to vector, searches LanceDB, filters by user ownership
-    |
-    |--- GET /api/videos/stream/{id}
-    |       Verifies ownership via session cookie, then streams video file
-    |
-    |--- Background Pipeline:
-    |       Whisper transcribes audio
-    |       Sentence-transformer embeds each segment
-    |       Segments stored in SQLite + LanceDB
-    |
-    v
-Storage Layer
-    |--- SQLite: video metadata, text segments, user ownership
-    |--- LanceDB: 384-dim vectors for semantic search
-    |--- Cloudflare R2 or local disk: video files
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/health` | Health check |
+| GET | `/api/session` | Issue/verify the session cookie |
+| POST | `/api/videos/ingest` | Store browser-produced transcript segments |
+| GET | `/api/videos` | List this session's videos |
+| GET | `/api/videos/status/{id}` | Status of one video (compat shim) |
+| GET | `/api/search?q=...` | Semantic search within this session |
+| DELETE | `/api/videos/{id}` | Delete a video and its data |
+| POST | `/api/upload` | **Retired** — returns `410 Gone` |
+
+**Ingest contract** (`POST /api/videos/ingest`):
+
+```json
+{
+  "filename": "lecture.mp4",
+  "duration": 42.5,
+  "segments": [
+    { "text": "Today we discuss quicksort.", "start": 0.0, "end": 6.2 }
+  ]
+}
 ```
 
----
-
-## Security
-
-Every endpoint verifies the user's session cookie before returning data. Videos, transcripts, search results, and embeddings are all scoped to the session that uploaded them.
-
-| Protection | How It Works |
-|-----------|--------------|
-| User isolation | Every database query filters by owner_id from the session cookie |
-| Video access control | Videos are not served as static files. They go through an API endpoint that checks ownership |
-| Session signing | Cookies are signed with HMAC-SHA256 so they cannot be forged |
-| Input sanitization | Filenames stripped of path traversal characters, search queries stripped of HTML |
-| File validation | Only video file extensions and MIME types are accepted |
-| Size limits | Uploads are rejected mid-stream if they exceed the configured maximum |
-| Rate limiting | Per-IP counters prevent abuse of upload and search endpoints |
-| UUID validation | All video IDs are validated as proper UUIDs before being used in queries |
+Segment fields are `text`, `start`, `end` (seconds). At least one non-empty
+segment is required. Response: `{ video_id, filename, segment_count, status }`.
 
 ---
 
@@ -113,60 +109,30 @@ Every endpoint verifies the user's session cookie before returning data. Videos,
 
 ```bash
 cd clipfinder/backend
+python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
 
-The first run will download the AI models (about 500MB total). After that, starts are instant.
+The embedding model (~80MB) downloads on first ingest/search.
 
 ### Frontend
 
 ```bash
 cd clipfinder/frontend
 npm install
-npm run dev
+npm run dev   # http://localhost:5173, proxies /api to localhost:8000
 ```
 
-Open https://clipfinder.netlify.app in your browser.
+The Whisper model downloads in the browser the first time you transcribe a video.
 
 ---
 
 ## Deploying for Free
 
-The entire stack can be hosted publicly at zero cost:
-
-| Service | Role | Free Tier Limits |
-|---------|------|-----------------|
-| Render.com | Backend API and AI processing | 750 hours per month, 512MB RAM |
-| Vercel | Frontend static hosting and CDN | Unlimited deploys |
-| Cloudflare R2 | Video file storage | 10GB storage, 10 million reads per month |
-
-### Steps
-
-1. Create a Cloudflare R2 bucket named `clipfinder-videos` and generate API credentials
-2. On Render, create a Web Service from your GitHub repo with root directory `clipfinder/backend` and Docker runtime
-3. Set the environment variables (see below)
-4. On Vercel, import the repo with root directory `clipfinder/frontend` and set `VITE_API_URL` to your Render URL
-
-### Backend Environment Variables
-
-```
-CLIPFINDER_ENV=production
-SESSION_SECRET=<run: python -c "import secrets; print(secrets.token_hex(32))">
-FRONTEND_URL=https://your-app.vercel.app
-R2_ACCOUNT_ID=<from cloudflare dashboard>
-R2_ACCESS_KEY_ID=<from R2 API token>
-R2_SECRET_ACCESS_KEY=<from R2 API token>
-R2_BUCKET_NAME=clipfinder-videos
-R2_PUBLIC_URL=https://pub-xxx.r2.dev
-MAX_UPLOAD_SIZE_MB=100
-```
-
-### Frontend Environment Variable
-
-```
-VITE_API_URL=https://clipfinder-api.onrender.com
-```
+See **[DEPLOY.md](./DEPLOY.md)** for click-by-click steps. In short: Netlify
+hosts the static frontend and proxies `/api/*` to the Render backend; Render runs
+the FastAPI service. No object storage and no GPU are needed.
 
 ---
 
@@ -176,50 +142,25 @@ VITE_API_URL=https://clipfinder-api.onrender.com
 clipfinder/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py            # API routes, middleware, video streaming
-│   │   ├── auth.py            # Session cookie creation and verification
-│   │   ├── config.py          # Environment variable loading
-│   │   ├── database.py        # SQLite setup, migrations, queries
-│   │   ├── vector_store.py    # LanceDB operations, embedding, search
-│   │   ├── pipeline.py        # Whisper transcription and embedding pipeline
-│   │   ├── storage_backend.py # File storage (local or Cloudflare R2)
-│   │   └── schemas.py         # Pydantic response models
-│   ├── storage/               # Local data directory (not committed)
-│   ├── requirements.txt
-│   └── Dockerfile
+│   │   ├── main.py          # API routes (ingest, search, videos, session)
+│   │   ├── auth.py          # Signed session cookies
+│   │   ├── config.py        # Env config (Turso optional)
+│   │   ├── database.py      # SQLite / Turso(libsql) with a shared row API
+│   │   ├── vector_store.py  # LanceDB embed + search
+│   │   └── schemas.py       # Pydantic request/response models
+│   ├── requirements.txt     # no faster-whisper, no boto3
+│   └── Dockerfile           # python:3.11-slim, no ffmpeg
 └── frontend/
     ├── src/
-    │   ├── components/        # UploadZone, SearchBar, VideoPlayer, VideoGallery, VideoList
-    │   ├── api.ts             # API client that sends session cookies
-    │   ├── App.tsx            # Main three-panel layout
-    │   └── main.tsx           # Entry point, initializes session
-    ├── package.json
-    ├── vite.config.ts
-    └── vercel.json
+    │   ├── transcribe.ts     # In-browser Whisper (Transformers.js)
+    │   ├── videoStore.ts     # video_id -> local object URL map
+    │   ├── api.ts            # API client (ingest contract lives here)
+    │   ├── components/       # UploadZone, SearchBar, VideoPlayer, VideoGallery, VideoList
+    │   ├── App.tsx
+    │   └── main.tsx          # Renders immediately; session init is fire-and-forget
+    ├── netlify.toml          # base, build, publish, /api proxy
+    └── vercel.json           # /api proxy (alt host)
 ```
-
----
-
-## Performance
-
-| What | How Fast |
-|------|----------|
-| Transcription | Roughly 1x realtime on CPU (a 10 minute video takes about 10 minutes) |
-| Search | Under 100ms (vector similarity lookup plus database join) |
-| Embedding model | 80MB on disk, runs on CPU |
-| Whisper model | 150MB on disk, int8 quantized for CPU |
-| Vector size | 384 floats per segment |
-
----
-
-## What I Built This With
-
-- Full-stack development: FastAPI backend with React/TypeScript frontend
-- AI and ML: speech-to-text transcription, semantic text embeddings, vector similarity search
-- System design: multi-user data isolation, storage abstraction layer, background job processing
-- Security: session authentication, HMAC cookie signing, input validation, access-controlled streaming
-- Infrastructure: Docker containerization, Render deployment, Vercel CDN, Cloudflare R2 storage
-- Database design: SQLite with WAL mode, indexed foreign keys, schema migrations, LanceDB vector store
 
 ---
 

@@ -40,12 +40,48 @@ def get_db() -> lancedb.DBConnection:
     return lancedb.connect(str(LANCEDB_DIR))
 
 
+def _table_exists(db) -> bool:
+    try:
+        return TABLE_NAME in db.table_names()
+    except Exception:
+        return False
+
+
 def ensure_table_exists() -> None:
-    """Create the video_embeddings table if it doesn't exist."""
+    """No-op kept for backwards compatibility.
+
+    Modern LanceDB does not reliably persist an empty, schema-only table across
+    separate connections, so we create the table lazily WITH data on the first
+    write (see _append_records). Pre-creating an empty table here caused
+    'Table not found' on the subsequent open_table in another connection.
+    """
+    return None
+
+
+def _records_to_arrow(records: List[Dict[str, Any]]) -> "pa.Table":
+    """Build a pyarrow Table matching SCHEMA from a list of dict records.
+
+    Passing a pyarrow Table (instead of a list of dicts) avoids LanceDB's
+    optional-pandas code path, so we don't need pandas installed.
+    """
+    return pa.Table.from_pylist(records, schema=SCHEMA)
+
+
+def _append_records(records: List[Dict[str, Any]]) -> None:
+    """Create-with-data on first write, else open-and-append.
+
+    This single pattern works across LanceDB versions and avoids the empty
+    schema-only table pitfall.
+    """
+    if not records:
+        return
     db = get_db()
-    existing_tables = db.table_names()
-    if TABLE_NAME not in existing_tables:
-        db.create_table(TABLE_NAME, schema=SCHEMA)
+    arrow = _records_to_arrow(records)
+    if _table_exists(db):
+        table = db.open_table(TABLE_NAME)
+        table.add(arrow)
+    else:
+        db.create_table(TABLE_NAME, data=arrow)
 
 
 def encode_text(text: str) -> List[float]:
@@ -70,10 +106,7 @@ def add_embedding(
     end_time: float,
 ) -> None:
     """Add a single embedding record to the LanceDB table."""
-    db = get_db()
-    ensure_table_exists()
-    table = db.open_table(TABLE_NAME)
-    table.add([{
+    _append_records([{
         "vector": vector,
         "video_id": video_id,
         "text": text,
@@ -84,12 +117,7 @@ def add_embedding(
 
 def add_embeddings_batch(records: List[Dict[str, Any]]) -> None:
     """Add multiple embedding records at once (more efficient)."""
-    if not records:
-        return
-    db = get_db()
-    ensure_table_exists()
-    table = db.open_table(TABLE_NAME)
-    table.add(records)
+    _append_records(records)
 
 
 def search_embeddings(query_vector: List[float], top_k: int = 5) -> List[Dict[str, Any]]:
@@ -134,14 +162,12 @@ def search_embeddings_for_owner(
     if not allowed_video_ids:
         return []
 
-    db = get_db()
-    existing_tables = db.table_names()
-    if TABLE_NAME not in existing_tables:
-        return []
-
-    table = db.open_table(TABLE_NAME)
-
     try:
+        db = get_db()
+        existing_tables = db.table_names()
+        if TABLE_NAME not in existing_tables:
+            return []
+        table = db.open_table(TABLE_NAME)
         fetch_limit = top_k * 10
         results = (
             table.search(query_vector)

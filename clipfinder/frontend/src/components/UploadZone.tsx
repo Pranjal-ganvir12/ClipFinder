@@ -1,106 +1,83 @@
-import React, { useState, useCallback, useRef, useEffect } from "react";
-import { apiFetch } from "../api";
+import React, { useState, useCallback, useRef } from "react";
+import { ingestVideo } from "../api";
+import { transcribeFile, type TranscribeProgress } from "../transcribe";
+import { registerLocalVideo } from "../videoStore";
 
-interface UploadedVideo {
+interface ProcessedVideo {
   video_id: string;
   filename: string;
-  status: string;
+  status: "transcribing" | "indexing" | "completed" | "failed";
+  detail?: string;
 }
 
 interface UploadZoneProps {
-  onUploadComplete: () => void;
+  onUploadComplete: (video?: { video_id: string; filename: string }) => void;
 }
 
 const STATUS_CONFIG: Record<string, { label: string; color: string }> = {
-  pending: { label: "Queued", color: "text-slate bg-soft-stone border-hairline" },
-  processing: { label: "Transcribing...", color: "text-action-blue bg-pale-blue border-action-blue/20" },
+  transcribing: { label: "Transcribing…", color: "text-action-blue bg-pale-blue border-action-blue/20" },
+  indexing: { label: "Indexing…", color: "text-action-blue bg-pale-blue border-action-blue/20" },
   completed: { label: "Ready", color: "text-deep-green bg-pale-green border-deep-green/20" },
   failed: { label: "Failed", color: "text-[#b30000] bg-red-50 border-red-200" },
 };
 
 const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
   const [isDragging, setIsDragging] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [uploadedVideos, setUploadedVideos] = useState<UploadedVideo[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<TranscribeProgress | null>(null);
+  const [processed, setProcessed] = useState<ProcessedVideo[]>([]);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  useEffect(() => {
-    const pendingVideos = uploadedVideos.filter(
-      (v) => v.status === "pending" || v.status === "processing"
-    );
-
-    if (pendingVideos.length === 0) {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
-      }
-      return;
-    }
-
-    if (pollIntervalRef.current) return;
-
-    pollIntervalRef.current = setInterval(async () => {
-      const updated = [...uploadedVideos];
-      let anyChanged = false;
-
-      for (let i = 0; i < updated.length; i++) {
-        if (updated[i].status === "pending" || updated[i].status === "processing") {
-          try {
-            const res = await apiFetch(`/api/videos/status/${updated[i].video_id}`);
-            if (res.ok) {
-              const data = await res.json();
-              if (data.status !== updated[i].status) {
-                updated[i] = { ...updated[i], status: data.status };
-                anyChanged = true;
-                if (data.status === "completed" || data.status === "failed") {
-                  onUploadComplete();
-                }
-              }
-            }
-          } catch {}
-        }
-      }
-
-      if (anyChanged) setUploadedVideos(updated);
-    }, 3000);
-
-    return () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
-      }
-    };
-  }, [uploadedVideos, onUploadComplete]);
-
-  const handleUpload = async (file: File) => {
+  const handleFile = async (file: File) => {
     setError(null);
-    setUploading(true);
+    setBusy(true);
+    setProgress({ phase: "model", progress: 0, message: "Preparing…" });
 
-    const formData = new FormData();
-    formData.append("file", file);
+    // Keep the video playable this session via a client-side object URL.
+    const objectUrl = URL.createObjectURL(file);
 
     try {
-      const response = await apiFetch("/api/upload", {
-        method: "POST",
-        body: formData,
-      });
+      // 1. Transcribe entirely in the browser.
+      const { segments, duration } = await transcribeFile(file, (p) => setProgress(p));
 
-      if (!response.ok) {
-        const errData = await response.json().catch(() => null);
-        throw new Error(errData?.detail || "Upload failed");
+      // 2. Upload only the small text segments.
+      setProgress({ phase: "transcribe", progress: 100, message: "Indexing…" });
+      const ingestSegments = segments
+        .map((s) => ({ text: s.text.trim(), start: s.start, end: s.end }))
+        .filter((s) => s.text.length > 0);
+
+      if (ingestSegments.length === 0) {
+        // Backend requires >=1 segment; a silent video has no speech to index.
+        throw new Error("No speech detected in this video — nothing to index.");
       }
 
-      const data = await response.json();
-      setUploadedVideos((prev) => [
-        { video_id: data.video_id, filename: data.filename, status: data.status },
+      const result = await ingestVideo(file.name, duration, ingestSegments);
+
+      // 3. Bind the local object URL to the server-assigned video_id so
+      //    search results and the library can play it back this session.
+      registerLocalVideo(result.video_id, objectUrl);
+
+      setProcessed((prev) => [
+        {
+          video_id: result.video_id,
+          filename: result.filename,
+          status: "completed",
+          detail: `${result.segment_count} segments`,
+        },
         ...prev,
       ]);
+      onUploadComplete({ video_id: result.video_id, filename: result.filename });
     } catch (err: any) {
-      setError(err.message || "Upload failed. Please try again.");
+      URL.revokeObjectURL(objectUrl);
+      setError(err?.message || "Could not process this video. Please try again.");
+      setProcessed((prev) => [
+        { video_id: crypto.randomUUID(), filename: file.name, status: "failed" },
+        ...prev,
+      ]);
     } finally {
-      setUploading(false);
+      setBusy(false);
+      setProgress(null);
     }
   };
 
@@ -109,10 +86,11 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
     setIsDragging(false);
     const file = e.dataTransfer.files[0];
     if (file && file.type.startsWith("video/")) {
-      handleUpload(file);
+      void handleFile(file);
     } else {
       setError("Please drop a valid video file.");
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -127,8 +105,12 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) handleUpload(file);
+    if (file) void handleFile(file);
+    // reset so selecting the same file again re-triggers change
+    e.target.value = "";
   };
+
+  const progressPct = progress ? progress.progress : 0;
 
   return (
     <div className="space-y-3">
@@ -137,9 +119,10 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
         onDrop={handleDrop}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
-        onClick={() => fileInputRef.current?.click()}
+        onClick={() => !busy && fileInputRef.current?.click()}
         className={`
-          border border-dashed rounded-sm p-5 text-center cursor-pointer transition-all duration-200
+          border border-dashed rounded-sm p-5 text-center transition-all duration-200
+          ${busy ? "cursor-default" : "cursor-pointer"}
           ${isDragging
             ? "border-deep-green bg-pale-green"
             : "border-hairline hover:border-muted hover:bg-[#fafafa]"
@@ -152,15 +135,24 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
           accept="video/*"
           onChange={handleFileSelect}
           className="hidden"
+          disabled={busy}
         />
         <div className="flex flex-col items-center gap-2">
-          {uploading ? (
+          {busy ? (
             <>
               <svg className="w-5 h-5 text-action-blue animate-spin" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>
-              <p className="text-[13px] text-action-blue font-medium">Uploading...</p>
+              <p className="text-[13px] text-action-blue font-medium">
+                {progress?.message || "Working…"}
+              </p>
+              <div className="w-full h-1 bg-soft-stone rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-action-blue transition-all duration-200"
+                  style={{ width: `${progressPct}%` }}
+                />
+              </div>
             </>
           ) : (
             <>
@@ -169,7 +161,7 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
               </svg>
               <div>
                 <p className="text-[13px] text-ink font-medium">Drop video or browse</p>
-                <p className="text-[11px] text-muted mt-0.5">MP4, WebM, MOV, AVI</p>
+                <p className="text-[11px] text-muted mt-0.5">Transcribed in your browser · MP4, WebM, MOV</p>
               </div>
             </>
           )}
@@ -184,10 +176,10 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
       )}
 
       {/* Queue */}
-      {uploadedVideos.length > 0 && (
+      {processed.length > 0 && (
         <div className="space-y-1.5">
-          {uploadedVideos.map((video) => {
-            const config = STATUS_CONFIG[video.status] || STATUS_CONFIG.pending;
+          {processed.map((video) => {
+            const config = STATUS_CONFIG[video.status] || STATUS_CONFIG.indexing;
             return (
               <div
                 key={video.video_id}
@@ -197,10 +189,10 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onUploadComplete }) => {
                   {video.filename}
                 </span>
                 <span className="text-[11px] font-medium flex items-center gap-1.5">
-                  {video.status === "processing" && (
-                    <span className="w-1.5 h-1.5 rounded-full bg-action-blue animate-subtle-pulse"></span>
-                  )}
                   {config.label}
+                  {video.detail && video.status === "completed" && (
+                    <span className="text-muted">· {video.detail}</span>
+                  )}
                 </span>
               </div>
             );

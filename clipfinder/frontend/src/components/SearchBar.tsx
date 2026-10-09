@@ -4,7 +4,6 @@ import { apiFetch } from "../api";
 interface SearchResult {
   video_id: string;
   filename: string;
-  filepath: string;
   text: string;
   start_time: number;
   end_time: number;

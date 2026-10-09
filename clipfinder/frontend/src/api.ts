@@ -22,13 +22,50 @@ export async function apiFetch(path: string, options?: RequestInit): Promise<Res
 }
 
 /**
- * Initialize session on app load.
- * Ensures the session cookie is set before any other API calls.
+ * Initialize session on app load. Fire-and-forget: never awaited by render.
+ * A short timeout guarantees this settles even if the backend is unreachable.
  */
 export async function initSession(): Promise<void> {
   try {
-    await apiFetch("/api/session");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    await apiFetch("/api/session", { signal: controller.signal });
+    clearTimeout(timeout);
   } catch {
-    // Silent fail — session will be created on first API call
+    // Silent fail — session will be created on first successful API call.
   }
+}
+
+export interface IngestSegment {
+  text: string;
+  start: number;
+  end: number;
+}
+
+export interface IngestResponse {
+  video_id: string;
+  filename: string;
+  status: string;
+  segment_count: number;
+}
+
+/**
+ * Upload browser-produced transcript segments for a video. The video file
+ * itself is NOT uploaded — only this small JSON payload.
+ */
+export async function ingestVideo(
+  filename: string,
+  duration: number,
+  segments: IngestSegment[]
+): Promise<IngestResponse> {
+  const res = await apiFetch("/api/videos/ingest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filename, duration, segments }),
+  });
+  if (!res.ok) {
+    const errData = await res.json().catch(() => null);
+    throw new Error(errData?.detail || "Failed to index video");
+  }
+  return (await res.json()) as IngestResponse;
 }
