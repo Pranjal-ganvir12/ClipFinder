@@ -3,7 +3,29 @@
  * Sends cookies with every request for session-based auth.
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || "";
+/**
+ * Always call the API on the SAME ORIGIN as the page, via a relative path.
+ *
+ * Do NOT reintroduce a configurable absolute base URL (e.g. VITE_API_URL
+ * pointing at the Render host). Session auth depends on it:
+ *
+ *   The session cookie is set `SameSite=lax`, and browsers do NOT send Lax
+ *   cookies on cross-site fetch/XHR requests. When the frontend called the
+ *   Render origin directly, every request arrived WITHOUT a cookie, so the
+ *   backend minted a fresh session each time: an upload landed in one session
+ *   while the library/search queried another and saw nothing. The symptom was
+ *   "Ready · N segments" next to an empty "No videos yet" library.
+ *
+ * Every deployment target already proxies /api to the backend on the same
+ * origin, so a relative path works everywhere:
+ *   - Netlify  -> netlify.toml redirect (status 200 = rewrite/proxy)
+ *   - Vercel   -> vercel.json rewrites
+ *   - local    -> vite.config.ts server.proxy
+ *
+ * Keeping it same-origin also means we never rely on third-party cookies,
+ * which browsers are actively phasing out.
+ */
+const API_BASE_URL = "";
 
 export function apiUrl(path: string): string {
   return `${API_BASE_URL}${path}`;
