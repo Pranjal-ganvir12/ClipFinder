@@ -6,30 +6,42 @@ No signup required — privacy through isolation.
 """
 import uuid
 import hashlib
+import secrets
 import hmac
 import os
 from fastapi import Request, Response
 from app.config import settings
 
 # ─── Secret key for signing session cookies ──────────────────────────────────
-# In production SESSION_SECRET is REQUIRED. Previously this fell back to a
-# secret derived from STORAGE_DIR, which is a fixed, guessable path on Render
-# (/app/storage) — anyone could derive it and forge session cookies to read or
-# write another visitor's data. Fail fast instead of starting up insecurely.
+# SESSION_SECRET should always be set in production so that sessions survive a
+# restart. If it is missing we must NOT fall back to a secret derived from
+# STORAGE_DIR: that path is a fixed, guessable value on Render (/app/storage),
+# so anyone could derive the key and forge cookies to read another visitor's
+# data.
+#
+# Instead, generate a strong RANDOM secret for this process. That keeps cookie
+# signing unforgeable without preventing the app from booting (a hard failure
+# here would take the whole service down on a misconfigured deploy). The only
+# cost is that existing cookies stop validating after a restart — which is
+# already the case on free hosting, where the database is wiped on restart
+# anyway, so no durable data is lost.
 _env_secret = os.getenv("SESSION_SECRET", "").strip()
 
-if settings.is_production and not _env_secret:
-    raise RuntimeError(
-        "SESSION_SECRET is required when CLIPFINDER_ENV=production. "
-        "Without it, session cookies are signed with a guessable key derived "
-        "from the storage path and can be forged. "
-        'Generate one with: python -c "import secrets; print(secrets.token_hex(32))" '
-        "and set it in your host's environment variables."
+if _env_secret:
+    SESSION_SECRET = _env_secret
+elif settings.is_production:
+    SESSION_SECRET = secrets.token_hex(32)
+    print(
+        "[auth] WARNING: SESSION_SECRET is not set. Using a random per-process "
+        "secret, so all sessions are invalidated on restart. Set SESSION_SECRET "
+        'in your environment (generate: python -c "import secrets; '
+        'print(secrets.token_hex(32))").'
     )
-
-SESSION_SECRET = _env_secret or hashlib.sha256(
-    f"clipfinder-local-{settings.STORAGE_DIR}".encode()
-).hexdigest()
+else:
+    # Local development only: stable secret so sessions persist across reloads.
+    SESSION_SECRET = hashlib.sha256(
+        f"clipfinder-local-{settings.STORAGE_DIR}".encode()
+    ).hexdigest()
 
 COOKIE_NAME = "clipfinder_session"
 COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # 1 year
