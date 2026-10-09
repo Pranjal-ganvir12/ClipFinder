@@ -1,5 +1,5 @@
 /**
- * In-browser audio transcription using Transformers.js (@huggingface/transformers).
+ * In-browser video transcription using Transformers.js (@huggingface/transformers).
  *
  * Why the backend no longer transcribes
  * --------------------------------------
@@ -8,127 +8,65 @@
  * Whisper (`Xenova/whisper-tiny.en`) entirely in the browser and only POST
  * small text segments to the backend.
  *
- * Threading choice: MAIN THREAD (documented)
- * ------------------------------------------
- * Transformers.js supports Web Workers, but wiring a worker through Vite's
- * bundler (model asset URLs, WASM backends, cross-origin isolation for
- * SharedArrayBuffer) adds real build fragility. The whisper-tiny.en model is
- * small and runs via WASM, and the heavy work happens inside the pipeline's
- * own async loop, so we run on the main thread and keep the UI responsive by:
- *   - streaming genuine progress through the `onProgress` callback (model
- *     download % and transcription %), driven by Transformers.js callbacks;
- *   - yielding to the event loop between phases.
- * If this ever needs to move off the main thread, `transcribeFile` is a pure
- * function of `File` and can be dropped into a worker without API changes.
+ * Threading: inference runs in a WEB WORKER
+ * -----------------------------------------
+ * Running the model on the main thread froze the tab ("Page Unresponsive" in
+ * Chrome) and left the progress bar stuck at 0% because React could never
+ * repaint. The split is:
+ *   - main thread: decode the file's audio to 16kHz mono (requires
+ *     `AudioContext`/`decodeAudioData`, which workers do not have). This is
+ *     comparatively fast.
+ *   - worker: Whisper inference, the long CPU-bound part. Progress is streamed
+ *     back by postMessage so the UI stays interactive and repaints.
+ * If the worker cannot be constructed we fall back to main-thread inference so
+ * transcription still works, just without the responsiveness benefit.
  */
 
 import {
-  pipeline,
-  env,
-  type AutomaticSpeechRecognitionPipeline,
-} from "@huggingface/transformers";
+  runTranscription,
+  TARGET_SAMPLE_RATE,
+  type ProgressCallback,
+  type TranscribeProgress,
+  type TranscriptSegment,
+} from "./asr";
+import type { WorkerRequest, WorkerResponse } from "./transcribe.worker";
 
-// Pull models from the Hugging Face Hub (CDN), never from a local /models path.
-env.allowLocalModels = false;
-env.useBrowserCache = true;
+export type { TranscriptSegment, TranscribeProgress, ProgressCallback };
 
-const MODEL_ID = "Xenova/whisper-tiny.en";
-const TARGET_SAMPLE_RATE = 16000;
-
-export interface TranscriptSegment {
-  text: string;
-  start: number;
-  end: number;
-}
-
-export type TranscribePhase = "model" | "audio" | "transcribe";
-
-export interface TranscribeProgress {
-  phase: TranscribePhase;
-  /** 0-100, best-effort. */
-  progress: number;
-  message: string;
-}
-
-export type ProgressCallback = (p: TranscribeProgress) => void;
-
-// --- Model singleton (cached across calls) ---------------------------------
-
-let asrPipelinePromise: Promise<AutomaticSpeechRecognitionPipeline> | null = null;
-
-/**
- * Lazily load (and cache) the ASR pipeline. The first call downloads the model
- * weights; subsequent calls resolve instantly from the in-memory singleton.
- */
-async function getPipeline(
-  onProgress?: ProgressCallback
-): Promise<AutomaticSpeechRecognitionPipeline> {
-  if (asrPipelinePromise) {
-    onProgress?.({ phase: "model", progress: 100, message: "AI model ready" });
-    return asrPipelinePromise;
-  }
-
-  asrPipelinePromise = pipeline("automatic-speech-recognition", MODEL_ID, {
-    // Transformers.js reports per-file download progress here.
-    progress_callback: (data: unknown) => {
-      if (!onProgress) return;
-      const d = data as {
-        status?: string;
-        progress?: number;
-        file?: string;
-      };
-      if (d.status === "progress" && typeof d.progress === "number") {
-        onProgress({
-          phase: "model",
-          progress: Math.max(0, Math.min(100, Math.round(d.progress))),
-          message: `Loading AI model ${Math.round(d.progress)}%`,
-        });
-      } else if (d.status === "ready" || d.status === "done") {
-        onProgress({ phase: "model", progress: 100, message: "AI model ready" });
-      } else {
-        onProgress({ phase: "model", progress: 0, message: "Loading AI model…" });
-      }
-    },
-  }) as Promise<AutomaticSpeechRecognitionPipeline>;
-
-  try {
-    return await asrPipelinePromise;
-  } catch (err) {
-    // Allow a later retry to re-attempt the download.
-    asrPipelinePromise = null;
-    throw err;
-  }
-}
-
-// --- Audio decoding ---------------------------------------------------------
+// --- Audio decoding (main thread only) --------------------------------------
 
 /**
  * Decode a video/audio File into a 16kHz mono Float32Array.
  *
  * `decodeAudioData` reads the audio track out of mp4/webm/mov containers in
- * modern browsers, so we can feed a VIDEO file directly. We then downmix to
- * mono and resample to 16kHz via an OfflineAudioContext (whisper's expected
- * input rate).
+ * modern browsers, so a VIDEO file can be fed in directly. We then downmix to
+ * mono and resample to 16kHz (Whisper's expected input rate) via an offline
+ * render.
  */
-async function decodeAudio(file: File): Promise<{ audio: Float32Array; duration: number }> {
+async function decodeAudio(
+  file: File
+): Promise<{ audio: Float32Array; duration: number }> {
   const arrayBuffer = await file.arrayBuffer();
 
-  // A short-lived AudioContext is only used to decode the compressed audio.
   const AudioCtx: typeof AudioContext =
-    window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext: typeof AudioContext })
+      .webkitAudioContext;
   const decodeCtx = new AudioCtx();
 
   let decoded: AudioBuffer;
   try {
     decoded = await decodeCtx.decodeAudioData(arrayBuffer.slice(0));
+  } catch {
+    throw new Error(
+      "Could not read audio from this file. Make sure the video has an audio track."
+    );
   } finally {
-    // Release the hardware context promptly.
     void decodeCtx.close();
   }
 
   const duration = decoded.duration;
 
-  // Resample + downmix to 16kHz mono using an offline render.
   const frameCount = Math.max(1, Math.ceil(duration * TARGET_SAMPLE_RATE));
   const offline = new OfflineAudioContext(1, frameCount, TARGET_SAMPLE_RATE);
   const source = offline.createBufferSource();
@@ -137,10 +75,119 @@ async function decodeAudio(file: File): Promise<{ audio: Float32Array; duration:
   source.start(0);
   const rendered = await offline.startRendering();
 
-  // Mono channel (OfflineAudioContext(1, …) already downmixed).
+  // OfflineAudioContext(1, …) already downmixed to mono.
   const audio = rendered.getChannelData(0);
-  // Return a copy decoupled from the AudioBuffer's backing store.
   return { audio: new Float32Array(audio), duration };
+}
+
+// --- Progress estimator -----------------------------------------------------
+
+/**
+ * Whisper's `chunk_callback` only fires once per 30s audio chunk, so a short
+ * clip can show 0% for the entire run. This advances a best-effort estimate on
+ * a timer; any real callback immediately overrides it. Capped below 100% so we
+ * never claim completion early.
+ */
+function createProgressPacer(
+  duration: number,
+  emit: (p: TranscribeProgress) => void
+): { start: () => void; override: (pct: number) => void; stop: () => void } {
+  let timer: ReturnType<typeof setInterval> | null = null;
+  let shown = 0;
+  const startedAt = Date.now();
+
+  // whisper-tiny on WASM runs roughly faster than realtime; assume ~1.5x the
+  // media duration as a pessimistic completion estimate, floored at 10s.
+  const estimatedMs = Math.max(10000, duration * 1500);
+
+  const tick = () => {
+    const elapsed = Date.now() - startedAt;
+    const est = Math.round((elapsed / estimatedMs) * 100);
+    // Ease off as it approaches the cap so it doesn't stall at a round number.
+    const next = Math.min(95, est);
+    if (next > shown) {
+      shown = next;
+      emit({ phase: "transcribe", progress: shown, message: `Transcribing ${shown}%` });
+    }
+  };
+
+  return {
+    start: () => {
+      if (!timer) timer = setInterval(tick, 500);
+    },
+    override: (pct: number) => {
+      if (pct > shown) {
+        shown = pct;
+        emit({ phase: "transcribe", progress: shown, message: `Transcribing ${shown}%` });
+      }
+    },
+    stop: () => {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    },
+  };
+}
+
+// --- Worker orchestration ---------------------------------------------------
+
+function createWorker(): Worker | null {
+  try {
+    return new Worker(new URL("./transcribe.worker.ts", import.meta.url), {
+      type: "module",
+    });
+  } catch {
+    return null;
+  }
+}
+
+function transcribeInWorker(
+  worker: Worker,
+  audio: Float32Array,
+  duration: number,
+  onProgress?: ProgressCallback
+): Promise<TranscriptSegment[]> {
+  return new Promise<TranscriptSegment[]>((resolve, reject) => {
+    const pacer = createProgressPacer(duration, (p) => onProgress?.(p));
+
+    const cleanup = () => {
+      pacer.stop();
+      worker.onmessage = null;
+      worker.onerror = null;
+      worker.terminate();
+    };
+
+    worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+      const msg = event.data;
+      if (msg.type === "progress") {
+        if (msg.payload.phase === "transcribe") {
+          // Real chunk progress wins over the estimate; begin pacing once
+          // inference has actually started.
+          pacer.start();
+          pacer.override(msg.payload.progress);
+        } else {
+          onProgress?.(msg.payload);
+        }
+      } else if (msg.type === "result") {
+        cleanup();
+        onProgress?.({ phase: "transcribe", progress: 100, message: "Transcribing 100%" });
+        resolve(msg.segments);
+      } else if (msg.type === "error") {
+        cleanup();
+        reject(new Error(msg.message));
+      }
+    };
+
+    worker.onerror = (event) => {
+      cleanup();
+      reject(new Error(event.message || "Transcription worker failed"));
+    };
+
+    const request: WorkerRequest = { type: "transcribe", audio, duration };
+    // Transfer the audio buffer so it is moved, not copied.
+    worker.postMessage(request, [audio.buffer]);
+  });
 }
 
 // --- Public API --------------------------------------------------------------
@@ -153,98 +200,29 @@ export async function transcribeFile(
   file: File,
   onProgress?: ProgressCallback
 ): Promise<{ segments: TranscriptSegment[]; duration: number }> {
-  // 1. Load the model (cached across calls).
-  const transcriber = await getPipeline(onProgress);
-
-  // 2. Decode audio to 16kHz mono.
+  // 1. Decode audio on the main thread (workers have no AudioContext).
   onProgress?.({ phase: "audio", progress: 0, message: "Reading audio…" });
   const { audio, duration } = await decodeAudio(file);
   onProgress?.({ phase: "audio", progress: 100, message: "Audio ready" });
 
-  // 3. Transcribe with chunking suitable for long audio.
-  onProgress?.({ phase: "transcribe", progress: 0, message: "Transcribing 0%" });
-
-  const output = (await transcriber(audio, {
-    return_timestamps: true,
-    chunk_length_s: 30,
-    stride_length_s: 5,
-    // Streamed chunk-level progress → map onto 0-100 by audio position.
-    chunk_callback: (chunk: unknown) => {
-      if (!onProgress) return;
-      const c = chunk as { offset?: number; tstamps?: [number, number] };
-      let frac = 0;
-      if (duration > 0 && typeof c.offset === "number") {
-        frac = c.offset / duration;
-      } else if (duration > 0 && c.tstamps && typeof c.tstamps[1] === "number") {
-        frac = c.tstamps[1] / duration;
-      }
-      const pct = Math.max(0, Math.min(99, Math.round(frac * 100)));
-      onProgress({ phase: "transcribe", progress: pct, message: `Transcribing ${pct}%` });
-    },
-  } as Record<string, unknown>)) as {
-    text?: string;
-    chunks?: Array<{ text?: string; timestamp?: [number | null, number | null] }>;
-  };
-
-  onProgress?.({ phase: "transcribe", progress: 100, message: "Transcribing 100%" });
-
-  const segments = buildSegments(output, duration);
-  return { segments, duration };
-}
-
-/**
- * Convert the pipeline output into clean segments with sane timestamp
- * fallbacks. Whisper can emit `null` timestamps (especially the final chunk's
- * end); we fill those from neighbours or the media duration.
- */
-function buildSegments(
-  output: {
-    text?: string;
-    chunks?: Array<{ text?: string; timestamp?: [number | null, number | null] }>;
-  },
-  duration: number
-): TranscriptSegment[] {
-  const chunks = output.chunks ?? [];
-
-  if (chunks.length === 0) {
-    // No per-chunk timestamps — fall back to one segment spanning the media.
-    const text = (output.text ?? "").trim();
-    if (!text) return [];
-    return [{ text, start: 0, end: duration > 0 ? duration : 0 }];
+  // 2. Run inference in a worker so the UI stays responsive.
+  const worker = createWorker();
+  if (worker) {
+    const segments = await transcribeInWorker(worker, audio, duration, onProgress);
+    return { segments, duration };
   }
 
-  const segments: TranscriptSegment[] = [];
-  let prevEnd = 0;
-
-  for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i];
-    const text = (chunk.text ?? "").trim();
-    if (!text) continue;
-
-    const ts = chunk.timestamp ?? [null, null];
-    let start = typeof ts[0] === "number" && !Number.isNaN(ts[0]) ? ts[0] : prevEnd;
-
-    let end: number;
-    if (typeof ts[1] === "number" && !Number.isNaN(ts[1])) {
-      end = ts[1];
-    } else {
-      // Borrow the next chunk's start, else the media duration, else +2s.
-      const nextStart = chunks[i + 1]?.timestamp?.[0];
-      if (typeof nextStart === "number" && !Number.isNaN(nextStart)) {
-        end = nextStart;
-      } else if (duration > 0) {
-        end = duration;
-      } else {
-        end = start + 2;
-      }
-    }
-
-    if (end < start) end = start;
-    if (start < 0) start = 0;
-
-    segments.push({ text, start, end });
-    prevEnd = end;
+  // Fallback: no worker available — run on the main thread. The tab will be
+  // unresponsive during inference, but transcription still succeeds.
+  const pacer = createProgressPacer(duration, (p) => onProgress?.(p));
+  pacer.start();
+  try {
+    const segments = await runTranscription(audio, duration, (p) => {
+      if (p.phase === "transcribe") pacer.override(p.progress);
+      else onProgress?.(p);
+    });
+    return { segments, duration };
+  } finally {
+    pacer.stop();
   }
-
-  return segments;
 }
